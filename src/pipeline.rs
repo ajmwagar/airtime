@@ -23,7 +23,7 @@ use crate::audio::AudioError;
 use crate::config::Persona;
 use crate::feeds::FeedCache;
 use crate::library::{MusicLibrary, Track, TrackHistory};
-use crate::mixer::pump_to_icecast;
+use crate::mixer::{pump_to_icecast, StreamFormat};
 use crate::scheduler::{SegmentScheduler, SlotKind};
 use crate::skills::{Skill, SkillContext, SkillOutput, SkillRuntime};
 use std::path::PathBuf;
@@ -213,11 +213,13 @@ pub struct KeepaliveConfig {
     pub idle_after: Duration,
 }
 
-/// Consumer-side configuration. Holds the chunk size we hand to ffmpeg
-/// and the optional silence-keepalive policy.
+/// Consumer-side configuration. Holds the chunk size we hand to ffmpeg,
+/// the wire-format we're encoding to, and the optional silence-keepalive
+/// policy.
 #[derive(Debug, Clone)]
 pub struct ConsumerConfig {
     pub chunk_size: usize,
+    pub format: StreamFormat,
     pub keepalive: Option<KeepaliveConfig>,
 }
 
@@ -248,7 +250,10 @@ pub async fn run_consumer(
         match next {
             Ok(Some(item)) => {
                 debug!(label = %item.label, duration_ms = item.duration_ms, "pumping");
-                if let Err(e) = pump_to_icecast(&item.path, &icecast_tx, config.chunk_size).await {
+                if let Err(e) =
+                    pump_to_icecast(&item.path, &icecast_tx, config.chunk_size, &config.format)
+                        .await
+                {
                     warn!(label = %item.label, error = %e, "pump failed — skipping segment");
                 }
             }
@@ -266,8 +271,13 @@ pub async fn run_consumer(
                         idle_secs = ka.idle_after.as_secs(),
                         "pumping silence keepalive"
                     );
-                    if let Err(e) =
-                        pump_to_icecast(&ka.silence_path, &icecast_tx, config.chunk_size).await
+                    if let Err(e) = pump_to_icecast(
+                        &ka.silence_path,
+                        &icecast_tx,
+                        config.chunk_size,
+                        &config.format,
+                    )
+                    .await
                     {
                         warn!(error = %e, "silence pump failed");
                     }
