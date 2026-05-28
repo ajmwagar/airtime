@@ -17,8 +17,8 @@ mod traffic;
 mod weather;
 
 pub use base::{
-    Skill, SkillContext, SkillError, SkillOutput, SkillRuntime, SKILL_SCORE_BASELINE,
-    SKILL_SCORE_PREFERRED, SKILL_SCORE_REQUIRED, SKILL_SCORE_SUPPRESSED,
+    RecentSegment, Skill, SkillContext, SkillError, SkillOutput, SkillRuntime,
+    SKILL_SCORE_BASELINE, SKILL_SCORE_PREFERRED, SKILL_SCORE_REQUIRED, SKILL_SCORE_SUPPRESSED,
 };
 pub use caller::CallerSkill;
 pub use fake_ad::FakeAdSkill;

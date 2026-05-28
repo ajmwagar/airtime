@@ -25,9 +25,8 @@ impl Skill for CallerSkill {
         let cfg = ctx.persona.skill_config(self.name());
         let system = system_prompt(ctx);
         let user = format!(
-            "Write a short fake call-in segment. Introduce the caller (give them a name and \
-             vibe), have them say something brief and odd, then react in your voice. Keep both \
-             sides distinct but believable. Max {} words.",
+            "Fake call-in. Introduce a caller (name + quirk), have them say something brief and odd, \
+             react in your voice. Keep both sides distinct. Max {} words.",
             cfg.max_words
         );
         let backend = ctx.persona.resolve_llm_backend(self.name());

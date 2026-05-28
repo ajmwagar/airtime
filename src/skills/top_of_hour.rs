@@ -51,9 +51,8 @@ impl Skill for TopOfHourSkill {
                 .join("\n")
         };
         let user = format!(
-            "Top of the hour. Give the station ID ({callsign}) and read these headlines in your \
-             own voice. Don't quote them verbatim — paraphrase, add brief commentary. \
-             Max {max} words. Spoken naturally.\n\nHeadlines:\n{headlines}",
+            "Top of hour: announce {callsign}, then ride these headlines in your voice — paraphrase, \
+             add brief takes, don't quote. Max {max} words.\n\n{headlines}",
             callsign = ctx.persona.host.callsign,
             max = cfg.max_words,
         );

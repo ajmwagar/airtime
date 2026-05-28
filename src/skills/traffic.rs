@@ -32,14 +32,13 @@ impl Skill for TrafficSkill {
         let system = system_prompt(ctx);
         let user = match ctx.feeds.traffic.as_ref() {
             Some(t) => format!(
-                "Traffic report: {summary} ({n} incidents in the metro). \
-                 Give a brief traffic read in your voice. Max {max} words. Spoken naturally.",
+                "Traffic read in your voice. {summary} ({n} incidents). Max {max} words.",
                 summary = t.summary,
                 n = t.incidents,
                 max = cfg.max_words,
             ),
             None => format!(
-                "No traffic data right now. Keep it brief and honest. Max {} words.",
+                "No traffic data — keep it brief and honest. Max {} words.",
                 cfg.max_words
             ),
         };

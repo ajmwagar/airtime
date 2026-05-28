@@ -13,6 +13,7 @@ import argparse
 import sys
 import numpy as np
 import soundfile as sf
+import re
 
 # Import and patch kokoro_onnx
 import kokoro_onnx
@@ -39,11 +40,100 @@ def _patched_create_audio(self, phonemes, voice, speed):
     }
     
     audio = self.sess.run(None, inputs)[0]
+    # Flatten to 1D array
+    if audio.ndim > 1:
+        audio = audio.flatten()
     # Return sample_rate from self (it's set in __init__)
     return audio, 24000  # Kokoro uses 24kHz
 
 # Apply the patch
 kokoro_onnx.Kokoro._create_audio = _patched_create_audio
+
+
+def split_text_into_chunks(text, max_phonemes=400):
+    """Split text into chunks that fit within phoneme limit.
+    
+    Tries to split on sentence boundaries first, then on clauses,
+    then on words as a last resort.
+    """
+    from kokoro_onnx.tokenizer import Tokenizer
+    
+    tokenizer = Tokenizer()
+    
+    # First check if the whole text fits
+    phonemes = tokenizer.phonemize(text, "en-us")
+    if len(phonemes) <= max_phonemes:
+        return [text]
+    
+    # Split on sentence boundaries first
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    chunks = []
+    current_chunk = ""
+    
+    for sentence in sentences:
+        test_chunk = current_chunk + " " + sentence if current_chunk else sentence
+        test_phonemes = tokenizer.phonemize(test_chunk, "en-us")
+        
+        if len(test_phonemes) <= max_phonemes:
+            current_chunk = test_chunk
+        else:
+            # Current chunk is full, save it and start new
+            if current_chunk:
+                chunks.append(current_chunk)
+            current_chunk = sentence
+    
+    if current_chunk:
+        chunks.append(current_chunk)
+    
+    # Verify all chunks fit
+    result = []
+    for chunk in chunks:
+        phonemes = tokenizer.phonemize(chunk, "en-us")
+        if len(phonemes) <= max_phonemes:
+            result.append(chunk)
+        else:
+            # Still too long, split on commas or just truncate
+            subchunks = re.split(r'(?<=[,;])\s+', chunk)
+            for subchunk in subchunks:
+                subphonemes = tokenizer.phonemize(subchunk, "en-us")
+                if len(subphonemes) <= max_phonemes:
+                    result.append(subchunk)
+                else:
+                    # Last resort: truncate with ellipsis
+                    result.append(subchunk[:100] + "...")
+    
+    return result if result else [text[:100] + "..."]
+
+
+def generate_long_audio(kokoro, text, voice, speed, lang):
+    """Generate audio for long text by splitting into chunks and appending."""
+    chunks = split_text_into_chunks(text)
+    
+    if len(chunks) == 1:
+        # Short text, use normal path
+        return kokoro.create(chunks[0], voice=voice, speed=speed, lang=lang)
+    
+    # Long text: generate each chunk and concatenate audio
+    all_audio = []
+    sample_rate = 24000
+    
+    for i, chunk in enumerate(chunks):
+        try:
+            audio, sr = kokoro.create(chunk, voice=voice, speed=speed, lang=lang)
+            # Audio is already flattened by _patched_create_audio
+            all_audio.append(audio)
+            sample_rate = sr
+        except Exception as e:
+            print(f"kokoro: chunk {i+1}/{len(chunks)} failed: {e}", file=sys.stderr)
+            # Continue with other chunks
+    
+    if not all_audio:
+        # All chunks failed, return silence
+        return np.zeros(24000, dtype=np.float32), sample_rate
+    
+    # Concatenate all audio chunks
+    full_audio = np.concatenate(all_audio)
+    return full_audio, sample_rate
 
 
 def main() -> int:
@@ -62,12 +152,12 @@ def main() -> int:
         return 2
 
     kokoro = Kokoro(args.model, args.voices)
-    samples, sample_rate = kokoro.create(
-        text, voice=args.voice, speed=args.speed, lang=args.lang
+    
+    # Use the long audio generator that splits and appends
+    samples, sample_rate = generate_long_audio(
+        kokoro, text, voice=args.voice, speed=args.speed, lang=args.lang
     )
-    # Flatten samples if 2D (kokoro-onnx returns (1, N) shape)
-    if samples.ndim > 1:
-        samples = samples.flatten()
+    
     sf.write(args.out, samples, sample_rate)
     return 0
 

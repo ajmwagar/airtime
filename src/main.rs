@@ -307,6 +307,7 @@ async fn run_station(
         history: TrackHistory::default(),
         clock: Arc::new(LocalClock),
         empty_library_backoff: Duration::from_secs(30),
+        recent: Default::default(),
     };
 
     let producer_result = producer.run(item_tx).await;

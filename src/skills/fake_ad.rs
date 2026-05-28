@@ -21,9 +21,8 @@ impl Skill for FakeAdSkill {
         let cfg = ctx.persona.skill_config(self.name());
         let system = system_prompt(ctx);
         let user = format!(
-            "Write a 30-second parody radio ad spot for a fictional product or business in the \
-             style of GTA Radio. Be over-the-top, era-appropriate, and slightly absurd. End with \
-             a fake phone number or tagline. Max {} words.",
+            "Parody radio ad — fictional product, era-appropriate, over-the-top, slightly absurd. \
+             End with a tagline or fake phone number. Max {} words.",
             cfg.max_words
         );
         let backend = ctx.persona.resolve_llm_backend(self.name());

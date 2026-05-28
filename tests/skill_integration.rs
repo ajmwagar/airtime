@@ -114,6 +114,7 @@ async fn track_intro_calls_llm_with_track_metadata() {
         daypart_tone: None,
         hour: 12,
         minute: 0,
+        recent: vec![],
     };
 
     // The skill will hit our wiremock'd Ollama, then call the stub TTS,

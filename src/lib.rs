@@ -14,4 +14,5 @@ pub mod pipeline;
 pub mod scheduler;
 pub mod skills;
 pub mod stream;
+pub mod text;
 pub mod tts;

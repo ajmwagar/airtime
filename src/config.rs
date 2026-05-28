@@ -179,6 +179,16 @@ pub struct Host {
     /// programming all day."
     #[serde(default)]
     pub dayparts: Vec<Daypart>,
+    /// Programming rules — how this DJ picks music and segues between it.
+    /// Optional: when missing we fall back to genre-agnostic random
+    /// selection, which is the pre-personality behaviour.
+    #[serde(default)]
+    pub programming: Programming,
+    /// Free-form voice quirks woven into every system prompt.
+    /// Optional: missing fields contribute nothing, so existing personas
+    /// keep working with no edits.
+    #[serde(default)]
+    pub personality: Personality,
 }
 
 fn default_tracks_per_break() -> usize {
@@ -272,6 +282,56 @@ pub fn celsius_to_fahrenheit(c: f64) -> f64 {
 /// km/h; persona-side we convert when imperial.
 pub fn kph_to_mph(kph: f64) -> f64 {
     kph * 0.621_371
+}
+
+/// Music programming rules — how a DJ picks tracks and links them.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Programming {
+    /// `"strict"` — only tracks tagged with one of `host.genre`.
+    /// `"blended"` — ~80% genre-matched, ~20% wildcards (default).
+    /// `"free"` — no filtering; previous behaviour.
+    #[serde(default = "default_genre_filter")]
+    pub genre_filter: String,
+    /// When the next track's genre differs from the previous, the
+    /// track-intro skill gets an explicit "you're segueing genres" hint
+    /// in its prompt. Off by default.
+    #[serde(default)]
+    pub narrate_transitions: bool,
+}
+
+impl Default for Programming {
+    fn default() -> Self {
+        Self {
+            genre_filter: default_genre_filter(),
+            narrate_transitions: false,
+        }
+    }
+}
+
+fn default_genre_filter() -> String {
+    "blended".into()
+}
+
+/// Voice quirks — recurring bits, catchphrases, sign-offs that the
+/// system prompt threads into every script the LLM writes.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Personality {
+    #[serde(default)]
+    pub signature_opener: Option<String>,
+    #[serde(default)]
+    pub signature_closer: Option<String>,
+    /// Lines or themes the host returns to. Listed in the system prompt
+    /// as material the host *can* draw on; the LLM picks naturally.
+    #[serde(default)]
+    pub recurring_bits: Vec<String>,
+    /// Short interjections — "sugar", "cats", "dig it" — that flavour
+    /// the host's voice.
+    #[serde(default)]
+    pub catchphrases: Vec<String>,
+    /// Persistent show-internal references — recurring fictional events,
+    /// venues, characters the host alludes to.
+    #[serde(default)]
+    pub inside_jokes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -486,6 +546,61 @@ format = "flac"
         // Per-skill `llm_backend` is None — caller resolves via
         // `resolve_llm_backend` to walk the persona → fallback chain.
         assert!(cfg.llm_backend.is_none());
+    }
+
+    #[test]
+    fn programming_defaults_when_block_missing() {
+        let persona: Persona = toml::from_str(DONNA).expect("parse");
+        assert_eq!(persona.host.programming.genre_filter, "blended");
+        assert!(!persona.host.programming.narrate_transitions);
+    }
+
+    #[test]
+    fn personality_defaults_to_empty() {
+        let persona: Persona = toml::from_str(DONNA).expect("parse");
+        assert!(persona.host.personality.signature_opener.is_none());
+        assert!(persona.host.personality.recurring_bits.is_empty());
+        assert!(persona.host.personality.catchphrases.is_empty());
+    }
+
+    #[test]
+    fn personality_block_parses() {
+        let toml = r#"
+[host]
+name = "X"
+callsign = "X"
+era = "X"
+genre = []
+voice_model = "X"
+tone_prompt = "X"
+
+[host.skills]
+
+[host.audio]
+loudness_target = -14.0
+
+[host.programming]
+genre_filter = "strict"
+narrate_transitions = true
+
+[host.personality]
+signature_opener = "Hello world."
+recurring_bits = ["one", "two"]
+catchphrases = ["sugar"]
+
+[stream]
+mount  = "/x"
+format = "mp3"
+"#;
+        let persona: Persona = toml::from_str(toml).expect("parse");
+        assert_eq!(persona.host.programming.genre_filter, "strict");
+        assert!(persona.host.programming.narrate_transitions);
+        assert_eq!(
+            persona.host.personality.signature_opener.as_deref(),
+            Some("Hello world.")
+        );
+        assert_eq!(persona.host.personality.recurring_bits.len(), 2);
+        assert_eq!(persona.host.personality.catchphrases, vec!["sugar"]);
     }
 
     /// Tiny persona with no `default_llm_backend` and no per-skill

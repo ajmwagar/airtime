@@ -25,7 +25,8 @@ use crate::feeds::FeedCache;
 use crate::library::{MusicLibrary, Track, TrackHistory};
 use crate::mixer::{pump_to_icecast, StreamFormat};
 use crate::scheduler::{SegmentScheduler, SlotKind};
-use crate::skills::{Skill, SkillContext, SkillOutput, SkillRuntime};
+use crate::skills::{RecentSegment, Skill, SkillContext, SkillOutput, SkillRuntime};
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -102,7 +103,17 @@ pub struct Producer {
     /// How long to wait before re-checking when the library comes back
     /// empty (avoids the spin loop). 30s in production; tests override.
     pub empty_library_backoff: Duration,
+    /// Rolling window of recently aired material (tracks + spoken
+    /// segments) — passed to every skill as `ctx.recent` so the host
+    /// can reference what just happened on the show. Initialise empty;
+    /// the producer grows it as it works.
+    pub recent: VecDeque<RecentSegment>,
 }
+
+/// How many recent items the producer keeps. ~5 tracks + a few
+/// spoken segments is enough context for callbacks without bloating
+/// the LLM prompt.
+const RECENT_CAPACITY: usize = 8;
 
 impl Producer {
     /// Run forever (or until `tx` is dropped). Returns the reason for exit.
@@ -127,8 +138,9 @@ impl Producer {
     }
 
     /// Build a `SkillContext` carrying the persona, current
-    /// daypart-tone overlay, and the wall-clock position. Skills read
-    /// these instead of pulling their own clock or persona state.
+    /// daypart-tone overlay, wall-clock position, and the rolling
+    /// recent-segments window. Skills read these instead of pulling
+    /// their own clock or persona state.
     fn build_context(
         &self,
         track: Option<Track>,
@@ -148,6 +160,7 @@ impl Producer {
             daypart_tone,
             hour,
             minute,
+            recent: self.recent.iter().cloned().collect(),
         }
     }
 
@@ -157,7 +170,12 @@ impl Producer {
         hour: u32,
         minute: u32,
     ) -> Result<(), PipelineError> {
-        let track = match self.library.pick_random_avoiding(&self.history).await {
+        let prog = &self.persona.host.programming;
+        let track = match self
+            .library
+            .pick(&self.history, &self.persona.host.genre, &prog.genre_filter)
+            .await
+        {
             Some(t) => t,
             None => {
                 warn!(
@@ -178,8 +196,17 @@ impl Producer {
             self.render_and_send(&skill, &ctx, tx).await?;
         }
         send(tx, PlayItem::from(&track)).await?;
+        self.note_recent(RecentSegment::Track {
+            artist: track.artist.clone(),
+            title: track.title.clone(),
+            genre: track.genre.clone(),
+        });
         if let Some(skill) = outro {
-            self.render_and_send(&skill, &ctx, tx).await?;
+            // Outro should see the just-played track in its `recent`
+            // window, so we rebuild the context after the push.
+            let feeds_after = self.feeds.snapshot().await;
+            let ctx_after = self.build_context(Some(track.clone()), feeds_after, hour, minute);
+            self.render_and_send(&skill, &ctx_after, tx).await?;
         }
         self.scheduler.note_track_played();
         Ok(())
@@ -208,7 +235,7 @@ impl Producer {
     }
 
     async fn render_and_send(
-        &self,
+        &mut self,
         skill: &Arc<dyn Skill>,
         ctx: &SkillContext,
         tx: &mpsc::Sender<PlayItem>,
@@ -220,7 +247,14 @@ impl Producer {
                     duration_ms = out.duration_ms,
                     "segment rendered"
                 );
-                send(tx, PlayItem::from(out)).await
+                let kind = out.segment_type;
+                let preview = first_chars(&out.text, 120);
+                let result = send(tx, PlayItem::from(out)).await;
+                self.note_recent(RecentSegment::Spoken {
+                    kind,
+                    script_preview: preview,
+                });
+                result
             }
             Err(e) => {
                 warn!(skill = skill.name(), error = %e, "skill failed — skipping");
@@ -228,6 +262,27 @@ impl Producer {
             }
         }
     }
+
+    fn note_recent(&mut self, item: RecentSegment) {
+        if self.recent.len() >= RECENT_CAPACITY {
+            self.recent.pop_front();
+        }
+        self.recent.push_back(item);
+    }
+}
+
+/// First `n` characters of `s` (not bytes — char boundaries safe).
+/// Used to summarise spoken scripts for the recent-context block.
+fn first_chars(s: &str, n: usize) -> String {
+    let mut out = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if i >= n {
+            out.push('…');
+            break;
+        }
+        out.push(c);
+    }
+    out
 }
 
 async fn send(tx: &mpsc::Sender<PlayItem>, item: PlayItem) -> Result<(), PipelineError> {
@@ -434,6 +489,8 @@ mod tests {
                 units: "imperial".into(),
                 dayparts: Vec::new(),
                 default_llm_backend: None,
+                programming: Default::default(),
+                personality: Default::default(),
                 audio: HostAudio {
                     eq_profile: None,
                     room_tone: false,
@@ -508,6 +565,7 @@ mod tests {
             history: TrackHistory::new(8),
             clock: Arc::new(FixedClock(12, 8)),
             empty_library_backoff: Duration::from_millis(1),
+            recent: Default::default(),
         };
 
         let (tx, mut rx) = mpsc::channel::<PlayItem>(8);
@@ -542,6 +600,7 @@ mod tests {
             history: TrackHistory::new(8),
             clock: Arc::new(FixedClock(12, 8)),
             empty_library_backoff: Duration::from_millis(20),
+            recent: Default::default(),
         };
 
         let (tx, _rx) = mpsc::channel::<PlayItem>(2);
@@ -602,6 +661,7 @@ mod tests {
             history: TrackHistory::new(1), // capacity 1 → guarantees alternation
             clock: Arc::new(FixedClock(12, 8)),
             empty_library_backoff: Duration::from_millis(1),
+            recent: Default::default(),
         };
 
         let (tx, mut rx) = mpsc::channel::<PlayItem>(4);
