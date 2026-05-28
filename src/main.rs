@@ -243,7 +243,7 @@ async fn run_station(
         user: settings.icecast.user.clone(),
         password: settings.icecast.password.clone(),
         mount: persona.stream.mount.clone(),
-        content_type: "application/ogg".into(),
+        content_type: "audio/flac".into(),
         station_name: persona.host.callsign.clone(),
         genre: persona.host.genre.join(", "),
         description: persona.host.tone_prompt.lines().next().unwrap_or("").into(),
