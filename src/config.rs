@@ -30,6 +30,8 @@ pub struct Settings {
     pub icecast: IcecastSettings,
     pub ollama: OllamaSettings,
     pub claude: ClaudeSettings,
+    #[serde(default)]
+    pub openrouter: Option<OpenRouterSettings>,
     pub kokoro: KokoroSettings,
     pub library: LibrarySettings,
     pub feeds: FeedsSettings,
@@ -58,6 +60,19 @@ pub struct OllamaSettings {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ClaudeSettings {
     pub model: String,
+    #[serde(default)]
+    pub base_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct OpenRouterSettings {
+    /// Model identifier, e.g. `anthropic/claude-3.5-sonnet`,
+    /// `meta-llama/llama-3.1-70b-instruct`,
+    /// `google/gemini-2.0-flash-exp:free`. See
+    /// <https://openrouter.ai/models> for the live catalogue.
+    pub model: String,
+    /// Override the default `https://openrouter.ai/api/v1` endpoint
+    /// (rarely useful outside of tests).
     #[serde(default)]
     pub base_url: Option<String>,
 }
@@ -378,5 +393,17 @@ true_peak       = -1.0
         assert_eq!(s.library.formats, vec!["flac", "wav", "aiff"]);
         assert!(s.library.scan_on_start);
         assert_eq!(s.feeds.traffic.as_ref().unwrap().provider, "tomtom");
+        // `[openrouter]` is optional — the fixture omits it.
+        assert!(s.openrouter.is_none());
+    }
+
+    #[test]
+    fn parses_settings_with_openrouter_block() {
+        let with_or =
+            format!("{SETTINGS}\n[openrouter]\nmodel = \"anthropic/claude-3.5-sonnet\"\n");
+        let s: Settings = toml::from_str(&with_or).expect("parse");
+        let or = s.openrouter.expect("openrouter present");
+        assert_eq!(or.model, "anthropic/claude-3.5-sonnet");
+        assert!(or.base_url.is_none());
     }
 }

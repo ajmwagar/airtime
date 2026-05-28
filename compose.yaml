@@ -56,6 +56,7 @@ services:
       RUST_LOG: "info,airtime=debug"
       # Optional secrets — pass through from the host shell or `.env`.
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
       TOMTOM_API_KEY: "${TOMTOM_API_KEY:-}"
     volumes:
       # Lossless music library — drop FLAC/WAV files here.

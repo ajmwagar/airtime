@@ -12,6 +12,13 @@ model    = "llama3.1:8b"
 model    = "claude-sonnet-4-20250514"
 # API key via ANTHROPIC_API_KEY env var
 
+# Optional: route some skills through OpenRouter for access to non-Claude,
+# non-local models (Gemini, Llama, Mistral, etc.) under a single API key.
+# Enable by uncommenting and setting `llm_backend = "openrouter"` on the
+# skills you want to route there. API key via OPENROUTER_API_KEY env var.
+# [openrouter]
+# model = "anthropic/claude-3.5-sonnet"
+
 [kokoro]
 model_path  = "./models/kokoro-v1.0.onnx"
 voices_path = "./models/voices.bin"

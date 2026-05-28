@@ -83,7 +83,9 @@ async fn track_intro_calls_llm_with_track_metadata() {
 
     let ollama = Arc::new(OllamaClient::new(server.uri(), "llama3.1:8b"));
     let claude_unused: Arc<dyn LlmBackend> = Arc::new(OllamaClient::new("http://0.0.0.0:0", "x"));
-    let llm = Arc::new(LlmRouter::new(ollama, claude_unused));
+    let openrouter_unused: Arc<dyn LlmBackend> =
+        Arc::new(OllamaClient::new("http://0.0.0.0:0", "x"));
+    let llm = Arc::new(LlmRouter::new(ollama, claude_unused, openrouter_unused));
 
     let tmp = TempDir::new().unwrap();
     let rt = SkillRuntime {

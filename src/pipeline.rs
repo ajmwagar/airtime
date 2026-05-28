@@ -331,7 +331,11 @@ mod tests {
     }
 
     fn runtime(temp_dir: PathBuf) -> SkillRuntime {
-        let llm = Arc::new(LlmRouter::new(Arc::new(StubBackend), Arc::new(StubBackend)));
+        let llm = Arc::new(LlmRouter::new(
+            Arc::new(StubBackend),
+            Arc::new(StubBackend),
+            Arc::new(StubBackend),
+        ));
         SkillRuntime {
             llm,
             tts: Arc::new(StubTts),

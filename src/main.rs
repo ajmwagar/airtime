@@ -5,7 +5,9 @@ use airtime::audio::AudioProcessor;
 use airtime::config::{Persona, Settings};
 use airtime::feeds::{news::NewsFetcher, weather::WeatherFetcher, FeedCache};
 use airtime::library::{MusicLibrary, TrackHistory};
-use airtime::llm::{claude::ClaudeClient, ollama::OllamaClient, LlmRouter};
+use airtime::llm::{
+    claude::ClaudeClient, ollama::OllamaClient, openrouter::OpenRouterClient, LlmRouter,
+};
 use airtime::pipeline::{run_consumer, LocalClock, PlayItem, Producer};
 use airtime::scheduler::SegmentScheduler;
 use airtime::skills::{build_enabled, SkillRuntime};
@@ -51,7 +53,23 @@ async fn main() -> Result<()> {
                 Arc::new(NoopBackend("ANTHROPIC_API_KEY missing"))
             }
         };
-    let llm = Arc::new(LlmRouter::new(ollama, claude));
+    let openrouter: Arc<dyn airtime::llm::LlmBackend> = match settings.openrouter.as_ref() {
+        Some(or_cfg) => match std::env::var("OPENROUTER_API_KEY") {
+            Ok(key) => {
+                let model = or_cfg.model.clone();
+                Arc::new(match or_cfg.base_url.as_deref() {
+                    Some(url) => OpenRouterClient::with_base_url(url, model, key),
+                    None => OpenRouterClient::new(model, key),
+                })
+            }
+            Err(_) => {
+                warn!("OPENROUTER_API_KEY not set — openrouter backend will return errors");
+                Arc::new(NoopBackend("OPENROUTER_API_KEY missing"))
+            }
+        },
+        None => Arc::new(NoopBackend("[openrouter] block not configured")),
+    };
+    let llm = Arc::new(LlmRouter::new(ollama, claude, openrouter));
 
     let tts_bin = settings
         .kokoro
