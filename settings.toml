@@ -1,11 +1,11 @@
 [icecast]
-host     = "localhost"
+host     = "icecast"
 port     = 8000
 password = "hackme"
 user     = "source"
 
 [ollama]
-base_url = "http://localhost:11434"
+base_url = "http://ollama:11434"
 model    = "llama3.1:8b"
 
 [claude]
@@ -17,7 +17,7 @@ model    = "claude-sonnet-4-20250514"
 # Enable by uncommenting and setting `llm_backend = "openrouter"` on the
 # skills you want to route there. API key via OPENROUTER_API_KEY env var.
 [openrouter]
-model = "google/gemini-flash-1.5"
+model = "google/gemini-2.0-flash"
 
 [kokoro]
 model_path  = "./models/kokoro-v1.0.onnx"

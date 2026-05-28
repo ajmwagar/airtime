@@ -60,8 +60,8 @@ services:
       - ./models:/app/models:ro
       # Persona TOMLs — bind the host copy so you can edit on the host.
       - ./personas:/app/personas:ro
-      # Optional: override the in-image settings.toml.
-      # - ./settings.toml:/app/settings.toml:ro
+      # Override the in-image settings.toml with host version.
+      - ./settings.toml:/app/settings.toml:ro
       - airtime-tmp:/tmp/airtime
 
 volumes:
