@@ -57,9 +57,9 @@ RUN apt-get update \
 # self-contained. `--break-system-packages` is required on Debian
 # Bookworm (PEP 668), which is fine inside a container.
 RUN pip3 install --no-cache-dir --break-system-packages \
-        "kokoro-onnx>=0.3.0" \
+        "kokoro-onnx>=0.5.0" \
         "soundfile>=0.12" \
-        "numpy<2"
+        "numpy>2.0.2"
 
 WORKDIR /app
 

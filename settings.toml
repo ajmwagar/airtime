@@ -17,13 +17,13 @@ model    = "claude-sonnet-4-20250514"
 # Enable by uncommenting and setting `llm_backend = "openrouter"` on the
 # skills you want to route there. API key via OPENROUTER_API_KEY env var.
 [openrouter]
-model = "google/gemini-2.0-flash"
+model = "google/gemini-2.5-flash"
 
 [kokoro]
 model_path  = "./models/kokoro-v1.0.onnx"
 voices_path = "./models/voices.bin"
 sample_rate = 24000
-binary  = "./docker/kokoro"   # local kokoro shim
+# binary path set via KOKORO_BIN env var in Dockerfile
 
 [library]
 path          = "/music"
