@@ -1,0 +1,37 @@
+[icecast]
+host     = "localhost"
+port     = 8000
+password = "hackme"
+user     = "source"
+
+[ollama]
+base_url = "http://localhost:11434"
+model    = "llama3.1:8b"
+
+[claude]
+model    = "claude-sonnet-4-20250514"
+# API key via ANTHROPIC_API_KEY env var
+
+[kokoro]
+model_path  = "./models/kokoro-v1.0.onnx"
+voices_path = "./models/voices.bin"
+sample_rate = 24000
+# binary  = "./bin/kokoro"   # uncomment if not on PATH
+
+[library]
+path          = "/music"
+formats       = ["flac", "wav", "aiff"]
+scan_on_start = true
+
+[feeds]
+weather_lat = 47.6062
+weather_lon = -122.3321
+
+[feeds.traffic]
+provider = "tomtom"
+# API key via TOMTOM_API_KEY env var
+
+[audio]
+temp_dir        = "/tmp/airtime"
+loudness_target = -14.0
+true_peak       = -1.0

@@ -1,0 +1,51 @@
+[host]
+name         = "Donna Wavelength"
+callsign     = "KFLT"
+era          = "1960s"
+genre        = ["jazz", "soul", "bossa nova"]
+voice_model  = "af_heart"
+tone_prompt  = """
+Warm, slightly sardonic late-night jazz host.
+1960s AM radio energy. Knows every session musician
+by name. Occasionally wistful. Never hurried.
+"""
+
+[host.skills]
+track_intro  = true
+track_outro  = true
+top_of_hour  = true
+weather      = true
+traffic      = false
+station_id   = true
+fake_ad      = false
+caller       = false
+
+[host.skill_config.top_of_hour]
+max_words    = 80
+llm_backend  = "claude"
+news_sources = ["https://feeds.npr.org/1001/rss.xml"]
+
+[host.skill_config.weather]
+max_words    = 40
+llm_backend  = "ollama"
+
+[host.skill_config.track_intro]
+max_words    = 40
+llm_backend  = "ollama"
+
+[host.skill_config.track_outro]
+max_words    = 30
+llm_backend  = "ollama"
+
+[host.skill_config.station_id]
+max_words    = 20
+llm_backend  = "ollama"
+
+[host.audio]
+eq_profile      = "warm_analog"
+room_tone       = true
+loudness_target = -14.0
+
+[stream]
+mount  = "/donna"
+format = "flac"
