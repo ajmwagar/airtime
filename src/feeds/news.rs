@@ -84,6 +84,22 @@ fn parse_rss(body: &str, source: &str, max_items: usize) -> Result<Vec<NewsItem>
     let mut summary = String::new();
     let mut buf = Vec::new();
 
+    // `BytesText` and `BytesCData` are distinct types in quick-xml but
+    // both wrap a byte slice we want to handle identically — extract once.
+    fn append_to_current_tag(
+        bytes: &[u8],
+        current_tag: Option<&str>,
+        title: &mut String,
+        summary: &mut String,
+    ) {
+        let text = String::from_utf8_lossy(bytes).into_owned();
+        match current_tag {
+            Some("title") => title.push_str(&text),
+            Some("description") => summary.push_str(&text),
+            _ => {}
+        }
+    }
+
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => {
@@ -113,25 +129,11 @@ fn parse_rss(body: &str, source: &str, max_items: usize) -> Result<Vec<NewsItem>
                 }
                 current_tag = None;
             }
-            Ok(Event::Text(t)) => {
-                if in_item {
-                    let text = String::from_utf8_lossy(t.as_ref()).into_owned();
-                    match current_tag.as_deref() {
-                        Some("title") => title.push_str(&text),
-                        Some("description") => summary.push_str(&text),
-                        _ => {}
-                    }
-                }
+            Ok(Event::Text(t)) if in_item => {
+                append_to_current_tag(t.as_ref(), current_tag.as_deref(), &mut title, &mut summary);
             }
-            Ok(Event::CData(t)) => {
-                if in_item {
-                    let text = String::from_utf8_lossy(t.as_ref()).into_owned();
-                    match current_tag.as_deref() {
-                        Some("title") => title.push_str(&text),
-                        Some("description") => summary.push_str(&text),
-                        _ => {}
-                    }
-                }
+            Ok(Event::CData(t)) if in_item => {
+                append_to_current_tag(t.as_ref(), current_tag.as_deref(), &mut title, &mut summary);
             }
             Ok(Event::Eof) => break,
             Err(e) => {

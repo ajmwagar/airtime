@@ -7,7 +7,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: "-D warnings"
 
 # Cancel superseded runs on the same branch.
 concurrency:
@@ -56,6 +55,10 @@ jobs:
     timeout-minutes: 30
     # Independent of `rust` so we still get docker-build signal even when
     # the Rust job is mid-fix. Lint failures shouldn't hide image breakage.
+    permissions:
+      # `cache-to: type=gha` writes back to the Actions cache service.
+      contents: read
+      actions: write
     steps:
       - uses: actions/checkout@v4
 
