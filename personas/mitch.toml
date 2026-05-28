@@ -10,6 +10,10 @@ Talks fast, talks loud, talks over himself.
 Loves a fake commercial, loves a weird caller.
 Half-believes the conspiracy theories he reads on-air.
 """
+# Default backend for any skill that doesn't override it — fixes the
+# station_id / weather / traffic skills silently falling through to
+# ollama when only the louder skills had explicit overrides.
+default_llm_backend = "openrouter"
 
 [host.skills]
 track_intro  = true
