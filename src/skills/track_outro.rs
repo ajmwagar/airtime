@@ -29,7 +29,7 @@ impl Skill for TrackOutroSkill {
             ))
         })?;
         let cfg = ctx.persona.skill_config(self.name());
-        let system = system_prompt(&ctx.persona);
+        let system = system_prompt(ctx);
         let user = format!(
             "Outro that track (\"{title}\" — {artist}) in max {max} words. Brief reflection or callback.{recent}",
             max = cfg.max_words,

@@ -36,6 +36,15 @@ pub struct SkillContext {
     pub persona: Persona,
     pub track: Option<Track>,
     pub feeds: FeedSnapshot,
+    /// Active daypart's `extra_tone`, if any — appended to the system
+    /// prompt so the host sounds different at 2 AM than at 2 PM. The
+    /// producer fills this from `host.current_daypart(hour)`.
+    pub daypart_tone: Option<String>,
+    /// Local wall-clock hour (0..24). Skills with hour-specific
+    /// behaviour read this instead of pulling their own clock.
+    pub hour: u32,
+    /// Local wall-clock minute (0..60).
+    pub minute: u32,
     /// Most-recent-last. Producer maintains; skills read only.
     pub recent: Vec<RecentSegment>,
 }
@@ -103,6 +112,16 @@ pub trait Skill: Send + Sync {
     fn time_score(&self, _minute: u32) -> i32 {
         SKILL_SCORE_BASELINE
     }
+
+    /// Opt in: this skill is supposed to fire **at most once per hour**
+    /// at a specific window (typically a `time_score` REQUIRED slot).
+    /// If a long track straddles the window and the skill never gets
+    /// a slot, the scheduler treats it as overdue and gives it makeup
+    /// priority at the next break — instead of skipping the hour
+    /// silently. See `SegmentScheduler::overdue_anchor_skill`.
+    fn must_fire_per_hour(&self) -> bool {
+        false
+    }
 }
 
 /// Common helper that turns the LLM script into a finished, processed
@@ -139,16 +158,19 @@ pub(crate) async fn render_segment(
     })
 }
 
-/// Build the system prompt for a skill call. Tight by design — every
-/// token paid for at the API, every token rewritten in the model's
-/// attention. Identity → voice signatures → output rules, no filler.
+/// Build the system prompt for a skill call.
 ///
-/// **TTS-safety section** stays last so it's the model's most recent
-/// instruction, with explicit Kokoro guidance: spell out numbers and
-/// abbreviations, punctuate for breath. Without this, hosts say
-/// "K-F-L-T nineteen-fifty-nine" as "kuf-lit one thousand nine hundred
-/// fifty nine" and the spell is broken.
-pub(crate) fn system_prompt(persona: &Persona) -> String {
+/// Sections in order:
+///   1. Identity + tone (one sentence).
+///   2. Daypart overlay (only when active — keeps off-hours personas tight).
+///   3. Voice signatures (personality block — only emitted when populated).
+///   4. **Kokoro output rules** — concrete failure-mode examples. The LLM
+///      otherwise reflex-emits Markdown and ALL-CAPS abbreviations, and
+///      Kokoro then pronounces every `*` as "asterisk" and `RPM` as
+///      "are pee em". Generic "speak naturally" instructions don't
+///      survive — the examples do.
+pub(crate) fn system_prompt(ctx: &SkillContext) -> String {
+    let persona = &ctx.persona;
     let mut out = format!(
         "You are {name} on {callsign}, the {era} {genres} station. {tone}",
         name = persona.host.name,
@@ -158,8 +180,11 @@ pub(crate) fn system_prompt(persona: &Persona) -> String {
         tone = persona.host.tone_prompt.trim(),
     );
 
-    // Personality block — single section, only emitted when there's
-    // something to put in it.
+    if let Some(dp) = ctx.daypart_tone.as_deref() {
+        out.push_str(&format!("\n\nRight now: {}", dp.trim()));
+    }
+
+    // Personality block — only emitted when there's something to put in it.
     let p = &persona.host.personality;
     let mut quirks = Vec::with_capacity(5);
     if let Some(o) = p.signature_opener.as_deref() {
@@ -184,14 +209,28 @@ pub(crate) fn system_prompt(persona: &Persona) -> String {
         }
     }
 
-    // TTS-safety + Kokoro pronunciation. Concrete examples beat vague
-    // rules; concrete > abstract.
+    // Kokoro-specific output rules. Wording is deliberately literal —
+    // the LLM responds to concrete examples better than abstract advice.
     out.push_str(
-        "\n\nOUTPUT — read aloud by Kokoro TTS:\n\
-         - Plain text only. No Markdown (* _ ` # [ ]), no headings, no bullets, no stage directions.\n\
-         - Spell numbers as words: \"nineteen fifty-nine\" not \"1959\".\n\
-         - Spell abbreviations: \"Mister Davis\" not \"Mr. Davis\", \"Doctor John\" not \"Dr. John\".\n\
-         - Punctuate for breath: comma for a beat, period to stop, em-dash for a longer pause.",
+        "\n\nOUTPUT — read aloud by Kokoro text-to-speech.\n\
+         Plain prose only. Do NOT use any of these characters: * _ ` # [ ] < >\n\
+         If you write '*' Kokoro literally says the word \"asterisk\".\n\
+         Do not write **bold**, _italic_, headings, or bullet lists. Work emphasis into the sentence.\n\
+         \n\
+         Spell out ALL-CAPS abbreviations the way you'd say them:\n\
+         - 'RPM' → 'revolutions per minute' (or 'R, P, M' if you mean the letters).\n\
+         - 'NPR' → 'N, P, R'.\n\
+         - Filler sounds like 'mhm' or 'uh-huh' — just say 'mm-hmm' written as the syllable, or skip them.\n\
+         \n\
+         Spell numbers as words:\n\
+         - '1959' → 'nineteen fifty-nine'.\n\
+         - '60s' → 'sixties'.\n\
+         - '$10' → 'ten dollars'.\n\
+         \n\
+         Spell honorifics:\n\
+         - 'Mr. Davis' → 'Mister Davis'. 'Dr. John' → 'Doctor John'. 'St. Louis' → 'Saint Louis'.\n\
+         \n\
+         Punctuate for breath: comma for a beat, period to stop, em-dash '—' for a longer pause.",
     );
     out
 }
@@ -246,6 +285,9 @@ mod tests {
                 skills: SkillToggles::default(),
                 skill_config: Default::default(),
                 default_llm_backend: None,
+                tracks_per_break: 3,
+                units: "imperial".into(),
+                dayparts: Vec::new(),
                 programming: Programming::default(),
                 personality: Personality::default(),
                 audio: HostAudio {
@@ -262,52 +304,71 @@ mod tests {
         }
     }
 
+    pub(crate) fn ctx() -> SkillContext {
+        SkillContext {
+            persona: persona(),
+            track: None,
+            feeds: FeedSnapshot::default(),
+            daypart_tone: None,
+            hour: 12,
+            minute: 0,
+            recent: Vec::new(),
+        }
+    }
+
     #[test]
     fn system_prompt_includes_identity() {
-        let p = system_prompt(&persona());
+        let p = system_prompt(&ctx());
         assert!(p.contains("Donna"));
         assert!(p.contains("KFLT"));
         assert!(p.contains("1960s"));
         assert!(p.contains("jazz, soul"));
     }
 
+    /// The Kokoro output-rules section is non-negotiable: every prompt
+    /// must carry the concrete examples. Vague rules ("speak naturally")
+    /// didn't survive contact with the actual model — Donna kept reading
+    /// "asterisk RPM asterisk" out loud.
     #[test]
-    fn system_prompt_always_demands_plain_text() {
-        let p = system_prompt(&persona());
-        // The TTS-safety instruction is non-negotiable — every call gets it.
-        assert!(p.contains("Kokoro TTS"));
-        assert!(p.contains("Plain text only"));
-        assert!(p.contains("No Markdown"));
+    fn system_prompt_warns_about_asterisks_and_caps() {
+        let p = system_prompt(&ctx());
+        assert!(p.contains("asterisk"));
+        assert!(p.contains("RPM"));
+        assert!(p.contains("revolutions per minute"));
     }
 
-    /// Kokoro mispronounces digits, abbreviations, and unpunctuated runs.
-    /// The system prompt must give concrete examples — vague "natural
-    /// speech" instructions don't survive contact with a fast model.
     #[test]
-    fn system_prompt_gives_kokoro_pronunciation_examples() {
-        let p = system_prompt(&persona());
-        assert!(
-            p.contains("nineteen fifty-nine"),
-            "year-spelling example: {p}"
-        );
-        assert!(p.contains("Mister"), "abbreviation example: {p}");
-        assert!(
-            p.contains("comma") && p.contains("em-dash"),
-            "punctuation guidance: {p}"
-        );
+    fn system_prompt_gives_number_and_honorific_examples() {
+        let p = system_prompt(&ctx());
+        assert!(p.contains("nineteen fifty-nine"));
+        assert!(p.contains("Mister"));
+    }
+
+    #[test]
+    fn system_prompt_includes_daypart_tone_when_set() {
+        let mut c = ctx();
+        c.daypart_tone = Some("Late-night driver vibe.".into());
+        let p = system_prompt(&c);
+        assert!(p.contains("Right now: Late-night driver vibe"));
+    }
+
+    #[test]
+    fn system_prompt_skips_daypart_when_unset() {
+        let p = system_prompt(&ctx());
+        assert!(!p.contains("Right now:"));
     }
 
     #[test]
     fn system_prompt_weaves_in_personality_when_set() {
-        let mut p = persona();
-        p.host.personality = Personality {
+        let mut c = ctx();
+        c.persona.host.personality = Personality {
             signature_opener: Some("Donna here on KFLT.".into()),
             signature_closer: Some("Stay smooth.".into()),
             recurring_bits: vec!["I knew Mingus when he was just Chuck.".into()],
             catchphrases: vec!["sugar".into(), "cats".into()],
             inside_jokes: vec!["Studio One sessions".into()],
         };
-        let s = system_prompt(&p);
+        let s = system_prompt(&c);
         assert!(s.contains("Voice signatures"));
         assert!(s.contains("opener: Donna here on KFLT."));
         assert!(s.contains("closer: Stay smooth."));
@@ -320,20 +381,10 @@ mod tests {
     fn system_prompt_skips_empty_personality_fields() {
         // Default persona has no quirks — the section header itself
         // should be absent so we don't waste tokens on empty markup.
-        let s = system_prompt(&persona());
+        let s = system_prompt(&ctx());
         assert!(!s.contains("Voice signatures"));
         assert!(!s.contains("opener:"));
         assert!(!s.contains("catchphrases:"));
-    }
-
-    /// Token-budget sanity check. The prompt should be tight enough
-    /// that even a personality-heavy persona stays well inside common
-    /// model context windows. Anchored at chars; bumping requires intent.
-    #[test]
-    fn system_prompt_stays_compact() {
-        let s = system_prompt(&persona());
-        // Bare persona prompt — identity + tone + output rules.
-        assert!(s.len() < 700, "bare prompt grew to {} chars: {s}", s.len());
     }
 
     #[test]

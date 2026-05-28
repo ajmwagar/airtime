@@ -83,10 +83,11 @@ impl MusicLibrary {
         guard.choose(&mut rand::thread_rng()).cloned()
     }
 
-    /// Random pick that avoids anything in `history`. If the entire
-    /// library is in the history window (which can happen when the
-    /// library is smaller than `TrackHistory` capacity), falls back to a
-    /// plain random pick rather than refusing to return anything.
+    /// Random pick that avoids anything in `history`. Cascading
+    /// preference: tracks whose path AND artist are both fresh win;
+    /// then tracks merely fresh on path; finally any track. The cascade
+    /// keeps small libraries playable while still spacing out repeats
+    /// when there's room to be picky.
     pub async fn pick_random_avoiding(
         &self,
         history: &super::history::TrackHistory,
@@ -95,14 +96,21 @@ impl MusicLibrary {
         if guard.is_empty() {
             return None;
         }
-        let fresh: Vec<&Track> = guard
+        let path_fresh: Vec<&Track> = guard
             .iter()
             .filter(|t| !history.contains(&t.path))
             .collect();
-        let pool = if fresh.is_empty() {
-            guard.iter().collect::<Vec<_>>()
+        let fully_fresh: Vec<&Track> = path_fresh
+            .iter()
+            .copied()
+            .filter(|t| !history.contains_artist(&t.artist))
+            .collect();
+        let pool = if !fully_fresh.is_empty() {
+            fully_fresh
+        } else if !path_fresh.is_empty() {
+            path_fresh
         } else {
-            fresh
+            guard.iter().collect::<Vec<_>>()
         };
         pool.choose(&mut rand::thread_rng()).map(|t| (*t).clone())
     }
@@ -421,7 +429,7 @@ mod tests {
         ])
         .await;
         let mut hist = super::super::history::TrackHistory::new(8);
-        hist.record(PathBuf::from("/a.flac"));
+        hist.record(PathBuf::from("/a.flac"), "x");
         let genres = vec!["jazz".into()];
         for _ in 0..15 {
             let pick = lib.pick(&hist, &genres, "strict").await.unwrap();
@@ -435,8 +443,10 @@ mod tests {
         lib.seed_for_test(vec![fake_track("/a.flac"), fake_track("/b.flac")])
             .await;
         let mut hist = super::super::history::TrackHistory::new(8);
-        hist.record(PathBuf::from("/a.flac"));
-        // With /a in history, only /b is fresh — must always be picked.
+        hist.record(PathBuf::from("/a.flac"), "x");
+        // /a is in history AND its artist is too; /b shares the artist
+        // but isn't path-blocked → cascade falls to path-fresh pool and
+        // picks /b every time.
         for _ in 0..10 {
             let pick = lib.pick_random_avoiding(&hist).await.unwrap();
             assert_eq!(pick.path, PathBuf::from("/b.flac"));
@@ -448,10 +458,40 @@ mod tests {
         let lib = MusicLibrary::new();
         lib.seed_for_test(vec![fake_track("/a.flac")]).await;
         let mut hist = super::super::history::TrackHistory::new(8);
-        hist.record(PathBuf::from("/a.flac"));
+        hist.record(PathBuf::from("/a.flac"), "x");
         // Only track is in history → fallback path returns it anyway.
         let pick = lib.pick_random_avoiding(&hist).await.unwrap();
         assert_eq!(pick.path, PathBuf::from("/a.flac"));
+    }
+
+    fn artist_track(path: &str, artist: &str) -> Track {
+        let mut t = fake_track(path);
+        t.artist = artist.into();
+        t
+    }
+
+    /// Two artists, two tracks each. After playing a Miles track, the
+    /// next pick should be a Coltrane track even though three Miles
+    /// tracks remain path-fresh — the artist ring spaces them out.
+    #[tokio::test]
+    async fn pick_random_avoiding_spaces_out_artists() {
+        let lib = MusicLibrary::new();
+        lib.seed_for_test(vec![
+            artist_track("/m1.flac", "Miles Davis"),
+            artist_track("/m2.flac", "Miles Davis"),
+            artist_track("/c1.flac", "John Coltrane"),
+            artist_track("/c2.flac", "John Coltrane"),
+        ])
+        .await;
+        let mut hist = super::super::history::TrackHistory::new(8);
+        hist.record(PathBuf::from("/m1.flac"), "Miles Davis");
+        for _ in 0..10 {
+            let pick = lib.pick_random_avoiding(&hist).await.unwrap();
+            assert_eq!(
+                pick.artist, "John Coltrane",
+                "should prefer artist-fresh pool"
+            );
+        }
     }
 
     #[tokio::test]

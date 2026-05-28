@@ -130,11 +130,19 @@ impl StreamFormat {
 /// ahead, listeners hear delayed content, and the idle gaps between
 /// back-to-back pumps trigger Icecast's `source-timeout`. With `-re`
 /// the consumer naturally back-pressures the upstream channel.
+///
+/// **Loudness target:** when `Some(target_lufs)`, applies single-pass
+/// `loudnorm` so music tracks and TTS host segments hit listeners at
+/// the same perceived level. Without this, music masters (typically
+/// -8 to -10 LUFS) are several dB hotter than the persona's
+/// pre-normalised speech and the host disappears between songs.
+/// Single-pass loudnorm adds ~150ms internal delay — fine for radio.
 pub async fn pump_to_icecast(
     src_path: &Path,
     sink: &mpsc::Sender<Vec<u8>>,
     chunk_size: usize,
     format: &StreamFormat,
+    loudness_target: Option<f64>,
 ) -> Result<(), AudioError> {
     let path_str = src_path.to_string_lossy().into_owned();
     let mut args: Vec<String> = vec![
@@ -145,6 +153,13 @@ pub async fn pump_to_icecast(
         "-i".into(),
         path_str.clone(),
     ];
+    if let Some(target) = loudness_target {
+        // Single-pass loudnorm: integrated loudness target, true-peak
+        // ceiling, loudness range. Defaults mirror the AudioProcessor's
+        // pre-pass on TTS so the two sources land at the same level.
+        args.push("-af".into());
+        args.push(format!("loudnorm=I={target:.1}:TP=-1.0:LRA=11"));
+    }
     args.extend(format.ffmpeg_encode_args());
 
     let mut child = Command::new(ffmpeg_bin())
@@ -296,13 +311,54 @@ mod tests {
         let fmt = StreamFormat::Mp3 { bitrate_kbps: 128 };
 
         std::env::set_var("FFMPEG_BIN", "/nope/nope/nope/ffmpeg");
-        let err = pump_to_icecast(&p, &tx, 1024, &fmt).await.unwrap_err();
+        let err = pump_to_icecast(&p, &tx, 1024, &fmt, None)
+            .await
+            .unwrap_err();
         assert!(matches!(err, AudioError::FfmpegMissing));
 
         std::env::set_var("FFMPEG_BIN", "/bin/false");
-        let err = pump_to_icecast(&p, &tx, 1024, &fmt).await.unwrap_err();
+        let err = pump_to_icecast(&p, &tx, 1024, &fmt, None)
+            .await
+            .unwrap_err();
         assert!(matches!(err, AudioError::FfmpegFailed { .. }));
 
         std::env::remove_var("FFMPEG_BIN");
+    }
+
+    /// When a loudness target is set, the loudnorm filter must land in
+    /// the ffmpeg args before the codec stage. Locks in the contract
+    /// that pump_to_icecast applies wire-level normalization — the
+    /// reason music and TTS sit at the same perceived level.
+    #[tokio::test]
+    async fn loudness_target_adds_loudnorm_filter() {
+        let tmp = TempDir::new().unwrap();
+        let p = tmp.path().join("dummy.flac");
+        std::fs::write(&p, b"not-really-flac").unwrap();
+        let (tx, _rx) = mpsc::channel::<Vec<u8>>(1);
+        let fmt = StreamFormat::Mp3 { bitrate_kbps: 128 };
+
+        // Capture the ffmpeg invocation by pointing FFMPEG_BIN at a
+        // script that echoes argv to stderr, then fails. Stderr comes
+        // back as part of FfmpegFailed::stderr.
+        let echo = tmp.path().join("echo-args.sh");
+        std::fs::write(&echo, "#!/bin/sh\necho \"$@\" >&2\nexit 1\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&echo, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        std::env::set_var("FFMPEG_BIN", echo.to_str().unwrap());
+        let err = pump_to_icecast(&p, &tx, 1024, &fmt, Some(-14.0))
+            .await
+            .unwrap_err();
+        std::env::remove_var("FFMPEG_BIN");
+
+        match err {
+            AudioError::FfmpegFailed { stderr, .. } => {
+                assert!(
+                    stderr.contains("-af") && stderr.contains("loudnorm=I=-14.0:TP=-1.0:LRA=11"),
+                    "loudnorm filter missing from ffmpeg args: {stderr}"
+                );
+            }
+            other => panic!("expected FfmpegFailed, got {other:?}"),
+        }
     }
 }

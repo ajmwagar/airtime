@@ -111,6 +111,9 @@ async fn track_intro_calls_llm_with_track_metadata() {
             bit_depth: Some(24),
         }),
         feeds: FeedSnapshot::default(),
+        daypart_tone: None,
+        hour: 12,
+        minute: 0,
         recent: vec![],
     };
 

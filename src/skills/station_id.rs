@@ -29,7 +29,7 @@ impl Skill for StationIdSkill {
         rt: &SkillRuntime,
     ) -> Result<SkillOutput, SkillError> {
         let cfg = ctx.persona.skill_config(self.name());
-        let system = system_prompt(&ctx.persona);
+        let system = system_prompt(ctx);
         let user = format!(
             "Drop a station ID for {callsign} ({genres}). Max {max} words.",
             callsign = ctx.persona.host.callsign,

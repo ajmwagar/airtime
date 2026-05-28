@@ -29,7 +29,7 @@ impl Skill for TrafficSkill {
         rt: &SkillRuntime,
     ) -> Result<SkillOutput, SkillError> {
         let cfg = ctx.persona.skill_config(self.name());
-        let system = system_prompt(&ctx.persona);
+        let system = system_prompt(ctx);
         let user = match ctx.feeds.traffic.as_ref() {
             Some(t) => format!(
                 "Traffic read in your voice. {summary} ({n} incidents). Max {max} words.",

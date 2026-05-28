@@ -10,7 +10,8 @@
 //! richer day-parted scheduler can replace this without touching the
 //! `Skill` interface.
 
-use crate::skills::Skill;
+use crate::skills::{Skill, SKILL_SCORE_PREFERRED};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// (intro, outro) skills for a music slot.
@@ -28,11 +29,18 @@ pub struct SegmentScheduler {
     skills: Vec<Arc<dyn Skill>>,
     /// How many tracks have played since the last break.
     tracks_since_break: usize,
-    /// Insert a break every N tracks.
+    /// Insert a break every N tracks. Can be updated mid-flight via
+    /// `set_tracks_per_break` when the active daypart changes.
     tracks_per_break: usize,
     /// Name of the most recently chosen break skill — used as a tiebreak
     /// to encourage rotation among baseline candidates.
     last_break_name: Option<String>,
+    /// For every `must_fire_per_hour` skill, the hour we last fired it
+    /// in. Drives drift-correction: if the current hour differs from
+    /// the recorded one and we're past the skill's preferred window,
+    /// the skill becomes "overdue" and gets bumped to PREFERRED so it
+    /// wins the next break slot.
+    last_fired_hour: HashMap<&'static str, u32>,
 }
 
 impl SegmentScheduler {
@@ -42,18 +50,43 @@ impl SegmentScheduler {
             tracks_since_break: 0,
             tracks_per_break: tracks_per_break.max(1),
             last_break_name: None,
+            last_fired_hour: HashMap::new(),
         }
     }
 
-    /// Returns the kind of segment the scheduler wants next. The caller
-    /// then either plays a music track (and optionally bracket it with
-    /// `next_track_skills`) or asks for `next_break_skill`.
-    pub fn peek_next(&self) -> SlotKind {
+    /// Update the music cadence — called by the producer at the start
+    /// of each scheduling decision so daypart changes take effect
+    /// immediately rather than at the next hour boundary.
+    pub fn set_tracks_per_break(&mut self, n: usize) {
+        self.tracks_per_break = n.max(1);
+    }
+
+    /// Returns the kind of segment the scheduler wants next.
+    ///
+    /// Drift correction: if any `must_fire_per_hour` skill is overdue
+    /// (we're past its preferred window and it hasn't fired this hour),
+    /// force a `Break` slot regardless of `tracks_since_break`.
+    /// Otherwise: `Break` once the music-cadence quota is reached.
+    pub fn peek_next(&self, hour: u32, minute: u32) -> SlotKind {
+        if self.has_overdue_anchor(hour, minute) {
+            return SlotKind::Break;
+        }
         if self.tracks_since_break >= self.tracks_per_break {
             SlotKind::Break
         } else {
             SlotKind::Track
         }
+    }
+
+    /// Is any hour-anchor skill overdue? "Overdue" = `must_fire_per_hour`
+    /// AND we haven't fired it this hour AND its `time_score(minute)` is
+    /// now zero (we're past its preferred slot).
+    fn has_overdue_anchor(&self, hour: u32, minute: u32) -> bool {
+        self.skills.iter().any(|s| {
+            s.must_fire_per_hour()
+                && self.last_fired_hour.get(s.name()) != Some(&hour)
+                && s.time_score(minute) == 0
+        })
     }
 
     /// Skills to run alongside a music track: `track_intro` (if enabled)
@@ -78,21 +111,45 @@ impl SegmentScheduler {
         self.tracks_since_break += 1;
     }
 
-    /// Pick the next non-track skill for the given minute of the hour.
+    /// Mark a break slot as resolved without a skill having fired —
+    /// nothing was eligible. Resets the cadence so the next slot is a
+    /// Track again; without this, `peek_next` stays pegged at `Break`
+    /// and the producer loop spins (no send → no yield → starves the
+    /// receiver task).
+    pub fn note_break_skipped(&mut self) {
+        self.tracks_since_break = 0;
+    }
+
+    /// Pick the next non-track skill for the given hour + minute.
     ///
-    /// Selection rule: of the enabled non-track skills, drop any with a
-    /// non-positive `time_score` (those are explicitly suppressed at
-    /// this minute), then pick the highest-scoring. Ties are broken in
-    /// favour of skills *different from the most recently chosen one*,
-    /// which gives us natural rotation among baseline candidates without
-    /// a separate round-robin index.
-    pub fn next_break_skill_at(&mut self, minute: u32) -> Option<Arc<dyn Skill>> {
+    /// Selection rule: score each enabled non-track skill, drop any
+    /// with a non-positive score, pick the highest. Two extras on top:
+    ///
+    /// **Drift correction for hour-anchor skills.** If a skill is
+    /// `must_fire_per_hour` and hasn't fired this hour, and its
+    /// `time_score(minute)` returns 0 (past its preferred window), we
+    /// override the score to `PREFERRED` so the skill competes for
+    /// makeup priority — instead of getting silently skipped because a
+    /// long track straddled its slot.
+    ///
+    /// **Tiebreak.** Among top-scoring candidates, prefer one different
+    /// from the most recently played skill — natural rotation.
+    pub fn next_break_skill_at(&mut self, hour: u32, minute: u32) -> Option<Arc<dyn Skill>> {
         let candidates: Vec<(i32, Arc<dyn Skill>)> = self
             .skills
             .iter()
             .filter(|s| !s.needs_track())
             .filter_map(|s| {
-                let score = s.time_score(minute);
+                let base = s.time_score(minute);
+                let needs_makeup =
+                    s.must_fire_per_hour() && self.last_fired_hour.get(s.name()) != Some(&hour);
+                let score = if base > 0 {
+                    base
+                } else if needs_makeup {
+                    SKILL_SCORE_PREFERRED
+                } else {
+                    0
+                };
                 if score > 0 {
                     Some((score, s.clone()))
                 } else {
@@ -112,9 +169,6 @@ impl SegmentScheduler {
             .map(|(_, sk)| sk)
             .collect();
 
-        // Prefer a skill different from the last one we ran. Fall back
-        // to the first top-tier candidate if everything matches the
-        // last-played name (e.g. only one candidate left).
         let pick = top_tier
             .iter()
             .find(|s| Some(s.name()) != self.last_break_name.as_deref())
@@ -123,6 +177,11 @@ impl SegmentScheduler {
 
         self.last_break_name = Some(pick.name().to_string());
         self.tracks_since_break = 0;
+        // Mark hour-anchor skills as "fired this hour" so drift logic
+        // won't keep firing them every break for the rest of the hour.
+        if pick.must_fire_per_hour() {
+            self.last_fired_hour.insert(pick.name(), hour);
+        }
         Some(pick)
     }
 }
@@ -188,16 +247,16 @@ mod tests {
             ],
             3,
         );
-        assert_eq!(sched.peek_next(), SlotKind::Track);
+        assert_eq!(sched.peek_next(12, 0), SlotKind::Track);
     }
 
     #[test]
     fn switches_to_break_after_quota() {
         let mut sched = SegmentScheduler::new(vec![Arc::new(Named("weather", false))], 2);
         sched.note_track_played();
-        assert_eq!(sched.peek_next(), SlotKind::Track);
+        assert_eq!(sched.peek_next(12, 0), SlotKind::Track);
         sched.note_track_played();
-        assert_eq!(sched.peek_next(), SlotKind::Break);
+        assert_eq!(sched.peek_next(12, 0), SlotKind::Break);
     }
 
     #[test]
@@ -212,9 +271,9 @@ mod tests {
             ],
             2,
         );
-        let first = sched.next_break_skill_at(8).unwrap().name();
-        let second = sched.next_break_skill_at(8).unwrap().name();
-        let third = sched.next_break_skill_at(8).unwrap().name();
+        let first = sched.next_break_skill_at(12, 8).unwrap().name();
+        let second = sched.next_break_skill_at(12, 8).unwrap().name();
+        let third = sched.next_break_skill_at(12, 8).unwrap().name();
         assert_ne!(first, second, "rotation should not repeat");
         assert_ne!(second, third, "rotation should not repeat");
     }
@@ -228,7 +287,7 @@ mod tests {
             ],
             1,
         );
-        let pick = sched.next_break_skill_at(0).unwrap();
+        let pick = sched.next_break_skill_at(12, 0).unwrap();
         assert_eq!(pick.name(), "weather");
     }
 
@@ -244,8 +303,14 @@ mod tests {
         });
         let mut sched: SegmentScheduler =
             SegmentScheduler::new(vec![top.clone(), weather.clone()], 2);
-        assert_eq!(sched.next_break_skill_at(0).unwrap().name(), "top_of_hour");
-        assert_eq!(sched.next_break_skill_at(3).unwrap().name(), "top_of_hour");
+        assert_eq!(
+            sched.next_break_skill_at(12, 0).unwrap().name(),
+            "top_of_hour"
+        );
+        assert_eq!(
+            sched.next_break_skill_at(12, 3).unwrap().name(),
+            "top_of_hour"
+        );
     }
 
     #[test]
@@ -260,7 +325,7 @@ mod tests {
             score_at: |_| 10,
         });
         let mut sched = SegmentScheduler::new(vec![top, weather], 2);
-        assert_eq!(sched.next_break_skill_at(10).unwrap().name(), "weather");
+        assert_eq!(sched.next_break_skill_at(12, 10).unwrap().name(), "weather");
     }
 
     #[test]
@@ -274,10 +339,13 @@ mod tests {
             score_at: |_| 10,
         });
         let mut sched = SegmentScheduler::new(vec![station, weather], 2);
-        assert_eq!(sched.next_break_skill_at(15).unwrap().name(), "station_id");
+        assert_eq!(
+            sched.next_break_skill_at(12, 15).unwrap().name(),
+            "station_id"
+        );
         // Outside the preferred window the two tie at 10 — tiebreak picks
         // *some* eligible skill, but it should be one of them.
-        let n = sched.next_break_skill_at(40).unwrap().name();
+        let n = sched.next_break_skill_at(12, 40).unwrap().name();
         assert!(n == "weather" || n == "station_id");
     }
 
@@ -288,7 +356,149 @@ mod tests {
             score_at: |m| if m < 5 { 100 } else { 0 },
         });
         let mut sched = SegmentScheduler::new(vec![s], 2);
-        assert!(sched.next_break_skill_at(30).is_none());
+        assert!(sched.next_break_skill_at(12, 30).is_none());
+    }
+
+    /// `Scored` with an `must_fire_per_hour` knob for drift testing.
+    struct Anchor {
+        name: &'static str,
+        score_at: fn(u32) -> i32,
+        anchor: bool,
+    }
+
+    #[async_trait]
+    impl Skill for Anchor {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+        fn needs_track(&self) -> bool {
+            false
+        }
+        fn time_score(&self, minute: u32) -> i32 {
+            (self.score_at)(minute)
+        }
+        fn must_fire_per_hour(&self) -> bool {
+            self.anchor
+        }
+        async fn generate(
+            &self,
+            _ctx: &SkillContext,
+            _rt: &SkillRuntime,
+        ) -> Result<SkillOutput, SkillError> {
+            unimplemented!()
+        }
+    }
+
+    /// Drift correction: top_of_hour-style skill that *should* fire at
+    /// :00–:04 but the producer's mid-track at :03. At :08 a long song
+    /// finally ends. Scheduler should: (1) recognise overdue, force
+    /// Break slot. (2) bump top_of_hour to PREFERRED so it wins the slot
+    /// against a baseline weather skill.
+    #[test]
+    fn drift_correction_fires_overdue_anchor_skill() {
+        let top = Arc::new(Anchor {
+            name: "top_of_hour",
+            score_at: |m| if m < 5 { 100 } else { 0 },
+            anchor: true,
+        });
+        let weather = Arc::new(Anchor {
+            name: "weather",
+            score_at: |_| 10,
+            anchor: false,
+        });
+        let mut sched = SegmentScheduler::new(vec![top, weather], 3);
+        // Not in preferred window (minute 8), top_of_hour hasn't fired this hour:
+        // overdue logic kicks in.
+        assert_eq!(sched.peek_next(14, 8), SlotKind::Break);
+        let pick = sched.next_break_skill_at(14, 8).unwrap();
+        assert_eq!(pick.name(), "top_of_hour");
+    }
+
+    /// Once an anchor skill has fired in a given hour, drift-correction
+    /// is silent for that hour even if `time_score` would otherwise
+    /// signal "overdue" — no double-news in the same hour.
+    #[test]
+    fn drift_correction_silent_after_anchor_fires_this_hour() {
+        let top = Arc::new(Anchor {
+            name: "top_of_hour",
+            score_at: |m| if m < 5 { 100 } else { 0 },
+            anchor: true,
+        });
+        let weather = Arc::new(Anchor {
+            name: "weather",
+            score_at: |_| 10,
+            anchor: false,
+        });
+        let mut sched = SegmentScheduler::new(vec![top, weather], 3);
+        // Fire top_of_hour in its preferred window.
+        let pick = sched.next_break_skill_at(14, 2).unwrap();
+        assert_eq!(pick.name(), "top_of_hour");
+        // Now mid-hour, no overdue logic should fire.
+        assert_eq!(sched.peek_next(14, 20), SlotKind::Track);
+        // And asking for the next break in this hour picks weather.
+        let pick2 = sched.next_break_skill_at(14, 30).unwrap();
+        assert_eq!(pick2.name(), "weather");
+    }
+
+    /// Drift correction resets each hour: even after firing at hour 14,
+    /// the same anchor skill is overdue again at hour 15 minute 8.
+    #[test]
+    fn drift_correction_resets_on_new_hour() {
+        let top = Arc::new(Anchor {
+            name: "top_of_hour",
+            score_at: |m| if m < 5 { 100 } else { 0 },
+            anchor: true,
+        });
+        let weather = Arc::new(Anchor {
+            name: "weather",
+            score_at: |_| 10,
+            anchor: false,
+        });
+        let mut sched = SegmentScheduler::new(vec![top, weather], 3);
+        sched.next_break_skill_at(14, 2);
+        // Skip ahead to hour 15 — top_of_hour overdue again.
+        assert_eq!(sched.peek_next(15, 8), SlotKind::Break);
+        let pick = sched.next_break_skill_at(15, 8).unwrap();
+        assert_eq!(pick.name(), "top_of_hour");
+    }
+
+    /// Daypart cadence change: scheduler honours `set_tracks_per_break`
+    /// immediately so the next slot decision uses the new cadence.
+    #[test]
+    fn set_tracks_per_break_updates_cadence_immediately() {
+        let mut sched = SegmentScheduler::new(vec![Arc::new(Named("weather", false))], 5);
+        for _ in 0..3 {
+            sched.note_track_played();
+        }
+        // Still 3 < 5, so Track.
+        assert_eq!(sched.peek_next(12, 0), SlotKind::Track);
+        // Switch to a tighter cadence — 3 tracks already played meets quota 2.
+        sched.set_tracks_per_break(2);
+        assert_eq!(sched.peek_next(12, 0), SlotKind::Break);
+    }
+
+    /// `note_break_skipped` resets the cadence so a no-eligible-skill
+    /// break doesn't leave `peek_next` pegged at `Break`. Without this,
+    /// the producer loop spins without sending or yielding.
+    #[test]
+    fn note_break_skipped_resets_cadence() {
+        let mut sched = SegmentScheduler::new(vec![], 2);
+        sched.note_track_played();
+        sched.note_track_played();
+        assert_eq!(sched.peek_next(12, 0), SlotKind::Break);
+        sched.note_break_skipped();
+        assert_eq!(sched.peek_next(12, 0), SlotKind::Track);
+    }
+
+    /// Cadence floor: `set_tracks_per_break(0)` is clamped to 1, so the
+    /// scheduler doesn't deadlock on a "break after zero tracks" config.
+    #[test]
+    fn set_tracks_per_break_clamps_zero_to_one() {
+        let mut sched = SegmentScheduler::new(vec![Arc::new(Named("weather", false))], 3);
+        sched.set_tracks_per_break(0);
+        // After 1 track played, peek_next should return Break (clamped to 1).
+        sched.note_track_played();
+        assert_eq!(sched.peek_next(12, 0), SlotKind::Break);
     }
 
     #[test]

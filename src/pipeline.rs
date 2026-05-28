@@ -63,15 +63,20 @@ impl From<SkillOutput> for PlayItem {
     }
 }
 
-/// Source of the current minute-of-hour. The producer reads this each
-/// loop to decide which break skill to schedule. Defaults to
-/// `chrono::Local`, but tests inject a deterministic clock.
+/// Wall-clock source. The producer reads this each loop to decide
+/// which daypart and break-skill window we're in. Defaults to
+/// `chrono::Local` — tests inject a deterministic clock.
 pub trait Clock: Send + Sync {
+    fn hour(&self) -> u32;
     fn minute(&self) -> u32;
 }
 
 pub struct LocalClock;
 impl Clock for LocalClock {
+    fn hour(&self) -> u32 {
+        use chrono::Timelike;
+        chrono::Local::now().hour()
+    }
     fn minute(&self) -> u32 {
         use chrono::Timelike;
         chrono::Local::now().minute()
@@ -117,16 +122,53 @@ impl Producer {
             if tx.is_closed() {
                 return Err(PipelineError::Closed);
             }
-            match self.scheduler.peek_next() {
-                SlotKind::Track => self.produce_track_slot(&tx).await?,
-                SlotKind::Break => self.produce_break_slot(&tx).await?,
+            let hour = self.clock.hour();
+            let minute = self.clock.minute();
+            // Apply the active daypart's cadence override (if any)
+            // before each decision so a daypart boundary takes effect
+            // on the very next slot, not the next hour.
+            let tpb = self.persona.host.tracks_per_break_at(hour);
+            self.scheduler.set_tracks_per_break(tpb);
+
+            match self.scheduler.peek_next(hour, minute) {
+                SlotKind::Track => self.produce_track_slot(&tx, hour, minute).await?,
+                SlotKind::Break => self.produce_break_slot(&tx, hour, minute).await?,
             }
+        }
+    }
+
+    /// Build a `SkillContext` carrying the persona, current
+    /// daypart-tone overlay, wall-clock position, and the rolling
+    /// recent-segments window. Skills read these instead of pulling
+    /// their own clock or persona state.
+    fn build_context(
+        &self,
+        track: Option<Track>,
+        feeds: crate::feeds::FeedSnapshot,
+        hour: u32,
+        minute: u32,
+    ) -> SkillContext {
+        let daypart_tone = self
+            .persona
+            .host
+            .current_daypart(hour)
+            .and_then(|d| d.extra_tone.clone());
+        SkillContext {
+            persona: self.persona.clone(),
+            track,
+            feeds,
+            daypart_tone,
+            hour,
+            minute,
+            recent: self.recent.iter().cloned().collect(),
         }
     }
 
     async fn produce_track_slot(
         &mut self,
         tx: &mpsc::Sender<PlayItem>,
+        hour: u32,
+        minute: u32,
     ) -> Result<(), PipelineError> {
         let prog = &self.persona.host.programming;
         let track = match self
@@ -144,14 +186,10 @@ impl Producer {
                 return Ok(());
             }
         };
-        self.history.record(track.path.clone());
+        self.history.record(track.path.clone(), &track.artist);
 
-        let ctx = SkillContext {
-            persona: self.persona.clone(),
-            track: Some(track.clone()),
-            feeds: self.feeds.snapshot().await,
-            recent: self.recent.iter().cloned().collect(),
-        };
+        let feeds = self.feeds.snapshot().await;
+        let ctx = self.build_context(Some(track.clone()), feeds, hour, minute);
         let (intro, outro) = self.scheduler.track_skills();
 
         if let Some(skill) = intro {
@@ -166,12 +204,8 @@ impl Producer {
         if let Some(skill) = outro {
             // Outro should see the just-played track in its `recent`
             // window, so we rebuild the context after the push.
-            let ctx_after = SkillContext {
-                persona: self.persona.clone(),
-                track: Some(track.clone()),
-                feeds: self.feeds.snapshot().await,
-                recent: self.recent.iter().cloned().collect(),
-            };
+            let feeds_after = self.feeds.snapshot().await;
+            let ctx_after = self.build_context(Some(track.clone()), feeds_after, hour, minute);
             self.render_and_send(&skill, &ctx_after, tx).await?;
         }
         self.scheduler.note_track_played();
@@ -181,23 +215,22 @@ impl Producer {
     async fn produce_break_slot(
         &mut self,
         tx: &mpsc::Sender<PlayItem>,
+        hour: u32,
+        minute: u32,
     ) -> Result<(), PipelineError> {
-        let minute = self.clock.minute();
-        let skill = match self.scheduler.next_break_skill_at(minute) {
+        let skill = match self.scheduler.next_break_skill_at(hour, minute) {
             Some(s) => s,
             None => {
-                // Nothing eligible right now — fall through to a track.
+                // Nothing eligible right now — reset the break counter so
+                // the next slot is a Track, otherwise peek_next stays
+                // pegged at Break and the loop spins without yielding.
                 debug!(minute, "no break skill eligible at this minute");
-                self.scheduler.note_track_played(); // keep break cadence sane
+                self.scheduler.note_break_skipped();
                 return Ok(());
             }
         };
-        let ctx = SkillContext {
-            persona: self.persona.clone(),
-            track: None,
-            feeds: self.feeds.snapshot().await,
-            recent: self.recent.iter().cloned().collect(),
-        };
+        let feeds = self.feeds.snapshot().await;
+        let ctx = self.build_context(None, feeds, hour, minute);
         self.render_and_send(&skill, &ctx, tx).await
     }
 
@@ -273,13 +306,18 @@ pub struct KeepaliveConfig {
 }
 
 /// Consumer-side configuration. Holds the chunk size we hand to ffmpeg,
-/// the wire-format we're encoding to, and the optional silence-keepalive
-/// policy.
+/// the wire-format we're encoding to, the optional silence-keepalive
+/// policy, and the optional final-pass loudness target. With
+/// `loudness_target = Some(-14.0)` (or whatever the persona uses), every
+/// segment — music, TTS, silence — gets a single-pass loudnorm at the
+/// ffmpeg encode step so listeners hear one consistent level rather
+/// than music several dB hotter than the host.
 #[derive(Debug, Clone)]
 pub struct ConsumerConfig {
     pub chunk_size: usize,
     pub format: StreamFormat,
     pub keepalive: Option<KeepaliveConfig>,
+    pub loudness_target: Option<f64>,
 }
 
 /// Consumer side: drain `PlayItem`s, hand each to `pump_to_icecast`.
@@ -309,9 +347,14 @@ pub async fn run_consumer(
         match next {
             Ok(Some(item)) => {
                 debug!(label = %item.label, duration_ms = item.duration_ms, "pumping");
-                if let Err(e) =
-                    pump_to_icecast(&item.path, &icecast_tx, config.chunk_size, &config.format)
-                        .await
+                if let Err(e) = pump_to_icecast(
+                    &item.path,
+                    &icecast_tx,
+                    config.chunk_size,
+                    &config.format,
+                    config.loudness_target,
+                )
+                .await
                 {
                     warn!(label = %item.label, error = %e, "pump failed — skipping segment");
                 }
@@ -335,6 +378,7 @@ pub async fn run_consumer(
                         &icecast_tx,
                         config.chunk_size,
                         &config.format,
+                        config.loudness_target,
                     )
                     .await
                     {
@@ -365,10 +409,14 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
 
-    struct FixedClock(u32);
+    /// `FixedClock(hour, minute)` — tests pin both wall-clock fields.
+    struct FixedClock(u32, u32);
     impl Clock for FixedClock {
-        fn minute(&self) -> u32 {
+        fn hour(&self) -> u32 {
             self.0
+        }
+        fn minute(&self) -> u32 {
+            self.1
         }
     }
 
@@ -448,6 +496,9 @@ mod tests {
                 tone_prompt: "Warm.".into(),
                 skills: SkillToggles::default(),
                 skill_config: Default::default(),
+                tracks_per_break: 3,
+                units: "imperial".into(),
+                dayparts: Vec::new(),
                 default_llm_backend: None,
                 programming: Default::default(),
                 personality: Default::default(),
@@ -523,7 +574,7 @@ mod tests {
             runtime: runtime(tmp.path().to_path_buf()),
             scheduler,
             history: TrackHistory::new(8),
-            clock: Arc::new(FixedClock(8)),
+            clock: Arc::new(FixedClock(12, 8)),
             empty_library_backoff: Duration::from_millis(1),
             recent: Default::default(),
         };
@@ -558,7 +609,7 @@ mod tests {
             runtime: runtime(tmp.path().to_path_buf()),
             scheduler,
             history: TrackHistory::new(8),
-            clock: Arc::new(FixedClock(8)),
+            clock: Arc::new(FixedClock(12, 8)),
             empty_library_backoff: Duration::from_millis(20),
             recent: Default::default(),
         };
@@ -619,7 +670,7 @@ mod tests {
             // tracks_per_break very high so we always stay in Track slots
             scheduler: SegmentScheduler::new(vec![], 999),
             history: TrackHistory::new(1), // capacity 1 → guarantees alternation
-            clock: Arc::new(FixedClock(8)),
+            clock: Arc::new(FixedClock(12, 8)),
             empty_library_backoff: Duration::from_millis(1),
             recent: Default::default(),
         };
