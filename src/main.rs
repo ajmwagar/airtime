@@ -8,7 +8,9 @@ use airtime::library::{MusicLibrary, TrackHistory};
 use airtime::llm::{
     claude::ClaudeClient, ollama::OllamaClient, openrouter::OpenRouterClient, LlmRouter,
 };
-use airtime::pipeline::{run_consumer, LocalClock, PlayItem, Producer};
+use airtime::pipeline::{
+    run_consumer, ConsumerConfig, KeepaliveConfig, LocalClock, PlayItem, Producer,
+};
 use airtime::scheduler::SegmentScheduler;
 use airtime::skills::{build_enabled, SkillRuntime};
 use airtime::stream::{run_source_with_retry, RetryPolicy, SourceConfig};
@@ -257,9 +259,30 @@ async fn run_station(
         }
     });
 
+    // Pre-render the silence keepalive file. If ffmpeg isn't reachable
+    // (sandbox / misconfig) we silently disable keepalive — the
+    // consumer still works, just without the source-timeout safety net.
+    let keepalive = match rt.audio.ensure_silence(3).await {
+        Ok(path) => Some(KeepaliveConfig {
+            silence_path: path,
+            idle_after: Duration::from_secs(5),
+        }),
+        Err(e) => {
+            warn!(error = %e, "could not pre-render silence keepalive; disabling");
+            None
+        }
+    };
     let consumer_audio_tx = audio_tx.clone();
     let consumer_task = tokio::spawn(async move {
-        run_consumer(item_rx, consumer_audio_tx, 16 * 1024).await;
+        run_consumer(
+            item_rx,
+            consumer_audio_tx,
+            ConsumerConfig {
+                chunk_size: 16 * 1024,
+                keepalive,
+            },
+        )
+        .await;
     });
 
     let scheduler = SegmentScheduler::new(build_enabled(&persona.host.skills), 3);

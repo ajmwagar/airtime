@@ -21,6 +21,15 @@ use tokio::sync::mpsc;
 
 /// Encode `flac_path` to Ogg/FLAC and push the bytes into `sink` in
 /// `chunk_size`-sized pieces. Returns when FFmpeg exits.
+///
+/// **Real-time pacing:** the `-re` flag tells FFmpeg to read the input
+/// at its native frame rate, so a 3-minute song takes 3 wall-clock
+/// minutes to pump. Without it, FFmpeg encodes + writes as fast as
+/// the CPU + pipe allow — bytes queue up in `sink`, the producer
+/// races ahead, listeners hear delayed content, and the idle gaps
+/// between back-to-back pumps trigger Icecast's `source-timeout`.
+/// With `-re` the consumer naturally back-pressures the upstream
+/// channel and listeners hear segments at the right pace.
 pub async fn pump_to_icecast(
     flac_path: &Path,
     sink: &mpsc::Sender<Vec<u8>>,
@@ -31,6 +40,7 @@ pub async fn pump_to_icecast(
             "-hide_banner",
             "-loglevel",
             "error",
+            "-re",
             "-i",
             flac_path.to_string_lossy().as_ref(),
             "-c:a",
