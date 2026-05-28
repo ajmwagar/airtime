@@ -90,8 +90,17 @@ impl TtsEngine for KokoroTts {
             })?;
 
         if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(text.as_bytes()).await?;
-            stdin.flush().await?;
+            // A child can exit before consuming stdin (e.g. on error, or
+            // when we stub it with `/bin/true` in tests). That manifests
+            // as `ErrorKind::BrokenPipe` here; swallow it — the
+            // exit-code check below carries the real signal.
+            if let Err(e) = stdin.write_all(text.as_bytes()).await {
+                if e.kind() != std::io::ErrorKind::BrokenPipe {
+                    return Err(KokoroError::Io(e));
+                }
+            } else {
+                let _ = stdin.flush().await;
+            }
         }
         let output = child.wait_with_output().await?;
         if !output.status.success() {

@@ -87,7 +87,9 @@ jobs:
           docker run --rm airtime:ci test -x /usr/local/bin/airtime
           docker run --rm airtime:ci test -x /usr/local/bin/kokoro
           docker run --rm airtime:ci ffmpeg -version | head -1
-          docker run --rm airtime:ci python3 -c "import kokoro_onnx; print('kokoro-onnx', kokoro_onnx.__version__)"
+          # kokoro_onnx doesn't expose `__version__` — just confirm the
+          # module imports (which exercises onnxruntime + numpy + soundfile too).
+          docker run --rm airtime:ci python3 -c "import kokoro_onnx; print('kokoro-onnx import OK')"
           # The image ships personas + settings — make sure they survived the build.
           docker run --rm airtime:ci test -f /app/settings.toml
           docker run --rm airtime:ci test -f /app/personas/donna.toml
