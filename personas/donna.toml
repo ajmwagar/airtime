@@ -51,4 +51,8 @@ loudness_target = -14.0
 
 [stream]
 mount  = "/donna"
-format = "flac"
+# Wire format choices: "mp3" (default-256k, universal), "opus" (default
+# 160k, modern + efficient), "flac" (lossless, narrower listener support).
+# Override the bitrate per-format with `bitrate = N` (kbps).
+format = "mp3"
+bitrate = 256

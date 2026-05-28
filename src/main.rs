@@ -8,6 +8,7 @@ use airtime::library::{MusicLibrary, TrackHistory};
 use airtime::llm::{
     claude::ClaudeClient, ollama::OllamaClient, openrouter::OpenRouterClient, LlmRouter,
 };
+use airtime::mixer::StreamFormat;
 use airtime::pipeline::{
     run_consumer, ConsumerConfig, KeepaliveConfig, LocalClock, PlayItem, Producer,
 };
@@ -239,13 +240,22 @@ async fn run_station(
     let (item_tx, item_rx) = mpsc::channel::<PlayItem>(2);
     let (audio_tx, audio_rx) = mpsc::channel::<Vec<u8>>(64);
 
+    let format = StreamFormat::parse(&persona.stream.format, persona.stream.bitrate)
+        .map_err(|e| anyhow::anyhow!("persona {} stream format: {e}", persona.host.callsign))?;
+    info!(
+        callsign = %persona.host.callsign,
+        format = ?format,
+        content_type = %format.content_type(),
+        "station encode format"
+    );
+
     let cfg = SourceConfig {
         host: settings.icecast.host.clone(),
         port: settings.icecast.port,
         user: settings.icecast.user.clone(),
         password: settings.icecast.password.clone(),
         mount: persona.stream.mount.clone(),
-        content_type: "application/ogg".into(),
+        content_type: format.content_type().to_string(),
         station_name: persona.host.callsign.clone(),
         genre: persona.host.genre.join(", "),
         description: persona.host.tone_prompt.lines().next().unwrap_or("").into(),
@@ -253,8 +263,8 @@ async fn run_station(
 
     let src_task = tokio::spawn(async move {
         if let Err(e) = run_source_with_retry(cfg, audio_rx, RetryPolicy::default()).await {
-            // Only fires on permanent config errors (bad mount, lossy
-            // content-type). Network drops are retried internally.
+            // Only fires on permanent config errors (bad mount).
+            // Network drops, auth errors, etc. are retried internally.
             error!(error = %e, "icecast source permanently failed");
         }
     });
@@ -273,12 +283,14 @@ async fn run_station(
         }
     };
     let consumer_audio_tx = audio_tx.clone();
+    let consumer_format = format.clone();
     let consumer_task = tokio::spawn(async move {
         run_consumer(
             item_rx,
             consumer_audio_tx,
             ConsumerConfig {
                 chunk_size: 16 * 1024,
+                format: consumer_format,
                 keepalive,
             },
         )

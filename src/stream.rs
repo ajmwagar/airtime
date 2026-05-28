@@ -3,19 +3,21 @@
 //! Icecast accepts source connections over plain HTTP. Two dialects:
 //!
 //! - **legacy `SOURCE`** (HTTP/1.0) — `SOURCE /mount HTTP/1.0` + Basic
-//!   auth, then the audio body streams forever.
+//!   auth, then the audio body streams as raw bytes until the
+//!   connection closes.
 //! - **modern `PUT`** (HTTP/1.1) — `PUT /mount HTTP/1.1` with
-//!   `Expect: 100-continue`, then the body.
+//!   `Expect: 100-continue` + `Transfer-Encoding: chunked`, then a
+//!   chunked body.
 //!
-//! We use `PUT` here because every supported Icecast2 build (>=2.4) speaks
-//! it and it's friendlier to proxies. The encoded audio bytes are
-//! consumed from a `tokio::sync::mpsc::Receiver` so the mixer can stitch
-//! segments together without ever touching disk or a named pipe.
-//!
-//! **Lossless invariant:** the only Content-Type we accept is
-//! `application/ogg` (Ogg/FLAC) — the call sites are responsible for
-//! making sure the body is actually Ogg-framed FLAC. Lossy codecs are
-//! rejected at construction time.
+//! We use **`SOURCE`** here. The modern `PUT` dialect *is* part of
+//! Icecast 2.4+'s source API, but in practice Icecast does **not**
+//! strip the HTTP/1.1 chunked-encoding framing from a source body — it
+//! relays the bytes as-is to listeners. The result is `{size}\r\n…\r\n`
+//! framing bytes interleaved into the audio stream every chunk, which
+//! decoders can't sync to; listeners then get HTTP 400 because Icecast
+//! never sees a valid stream. `SOURCE` + raw bytes is what every
+//! reference Icecast client (liquidsoap, ezstream, butt) does, and
+//! what every Icecast version since 1.x has accepted.
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
@@ -32,18 +34,9 @@ pub enum StreamError {
     Rejected { status: u16, body: String },
     #[error("icecast closed source connection unexpectedly")]
     Closed,
-    #[error("invalid lossy content-type `{0}` (Phase 1 is lossless-only)")]
-    LossyContentType(String),
     #[error("invalid mount `{0}` (must start with `/`)")]
     BadMount(String),
 }
-
-/// Lossless content-types we'll let through. The chain has to be Ogg-framed
-/// or Icecast won't fan it out correctly to listeners.
-const LOSSLESS_CTYPES: &[&str] = &[
-    "application/ogg", // Ogg/FLAC, Ogg/Vorbis (Vorbis is lossy — see filter below).
-    "audio/flac", // Native FLAC (no Ogg framing) — not all Icecast builds like it; here for completeness.
-];
 
 /// Source client configuration.
 #[derive(Debug, Clone)]
@@ -53,6 +46,8 @@ pub struct SourceConfig {
     pub user: String,
     pub password: String,
     pub mount: String,
+    /// Icecast Content-Type — `audio/mpeg` for MP3, `application/ogg`
+    /// for Opus and Ogg/FLAC. Derived from `StreamFormat::content_type`.
     pub content_type: String,
     pub station_name: String,
     pub genre: String,
@@ -63,11 +58,6 @@ impl SourceConfig {
     pub fn validate(&self) -> Result<(), StreamError> {
         if !self.mount.starts_with('/') {
             return Err(StreamError::BadMount(self.mount.clone()));
-        }
-        // Lossless guard: only allow known lossless container types.
-        let ct = self.content_type.to_ascii_lowercase();
-        if !LOSSLESS_CTYPES.iter().any(|c| ct == *c) {
-            return Err(StreamError::LossyContentType(self.content_type.clone()));
         }
         Ok(())
     }
@@ -97,12 +87,14 @@ pub async fn run_source(
     tracing::debug!(addr = %addr, "source: tcp connected");
     let (rd, mut wr) = stream.into_split();
 
-    // Headers: PUT /mount HTTP/1.1 + Basic + Icy metadata.
+    // Legacy SOURCE / HTTP/1.0 + Basic + Icy metadata. No `Expect`
+    // dance, no `Transfer-Encoding: chunked` — just raw bytes after
+    // the blank line. This is what liquidsoap, ezstream, and butt
+    // all do, and it's been Icecast's source protocol since 1.x.
     let auth = format!("{}:{}", cfg.user, cfg.password);
     let auth_b64 = B64.encode(auth.as_bytes());
     let req = format!(
-        "PUT {mount} HTTP/1.1\r\n\
-         Host: {host}:{port}\r\n\
+        "SOURCE {mount} HTTP/1.0\r\n\
          Authorization: Basic {auth}\r\n\
          User-Agent: airtime/0.1\r\n\
          Content-Type: {ctype}\r\n\
@@ -110,12 +102,8 @@ pub async fn run_source(
          Ice-Name: {name}\r\n\
          Ice-Genre: {genre}\r\n\
          Ice-Description: {desc}\r\n\
-         Expect: 100-continue\r\n\
-         Transfer-Encoding: chunked\r\n\
          \r\n",
         mount = cfg.mount,
-        host = cfg.host,
-        port = cfg.port,
         auth = auth_b64,
         ctype = cfg.content_type,
         name = cfg.station_name,
@@ -124,15 +112,11 @@ pub async fn run_source(
     );
     wr.write_all(req.as_bytes()).await?;
     wr.flush().await?;
-    tracing::debug!(mount = %cfg.mount, "source: request headers sent, waiting for response");
+    tracing::debug!(mount = %cfg.mount, "source: SOURCE headers sent, waiting for response");
 
-    // Read the response status line + headers. Icecast replies with
-    // `HTTP/1.1 100 Continue` on success; anything else is a rejection.
-    //
-    // Bound the wait — if Icecast doesn't speak Expect/100-Continue
-    // and is sitting silent waiting for body, the body-write loop
-    // will never run and listeners hear nothing. 10s is generous;
-    // anything longer is a bug to surface, not patience to reward.
+    // Icecast replies `HTTP/1.0 200 OK\r\n\r\n` to a good SOURCE; any
+    // other status is a rejection. Bound the wait so a silent server
+    // surfaces as a typed error instead of wedging the consumer.
     let mut rdr = BufReader::new(rd);
     let (status, body_preview) = match tokio::time::timeout(
         Duration::from_secs(10),
@@ -151,28 +135,29 @@ pub async fn run_source(
     tracing::info!(
         mount = %cfg.mount,
         status,
+        content_type = %cfg.content_type,
         "source: icecast response received"
     );
-    if !(status == 100 || status == 200) {
+    if status != 200 {
         return Err(StreamError::Rejected {
             status,
             body: body_preview,
         });
     }
 
-    // Pump chunks. Each `Vec<u8>` from the channel becomes one HTTP
-    // chunk. An empty terminator is sent when the channel closes.
+    // Pump raw bytes. No chunked framing — Icecast doesn't strip
+    // `Transfer-Encoding: chunked` framing from a source body, so any
+    // `{size}\r\n…\r\n` markers we'd add get relayed to listeners
+    // verbatim and corrupt the stream (which is exactly why listeners
+    // were getting HTTP 400 — Icecast had buffered garbage).
     let mut total_bytes: u64 = 0;
     let mut chunks: u64 = 0;
-    let mut next_log_threshold: u64 = 1 << 20; // log every 1 MiB
+    let mut next_log_threshold: u64 = 1 << 20;
     while let Some(chunk) = body.recv().await {
         if chunk.is_empty() {
             continue;
         }
-        let size_line = format!("{:X}\r\n", chunk.len());
-        wr.write_all(size_line.as_bytes()).await?;
         wr.write_all(&chunk).await?;
-        wr.write_all(b"\r\n").await?;
         wr.flush().await?;
 
         total_bytes += chunk.len() as u64;
@@ -194,13 +179,11 @@ pub async fn run_source(
             next_log_threshold = total_bytes + (1 << 20);
         }
     }
-    wr.write_all(b"0\r\n\r\n").await?;
-    wr.flush().await?;
     tracing::info!(
         mount = %cfg.mount,
         bytes = total_bytes,
         chunks,
-        "source: body channel closed, sent chunked terminator"
+        "source: body channel closed, source stream ending"
     );
     Ok(())
 }
@@ -224,9 +207,9 @@ impl Default for RetryPolicy {
 /// Wrap [`run_source`] in an exponential-backoff retry loop.
 ///
 /// Loops until the channel closes cleanly (clean exit) or a permanent
-/// config error fires (`LossyContentType`, `BadMount` — those will never
-/// succeed no matter how many times we retry). Every other error
-/// (TCP refused, Icecast rejected, connection dropped mid-stream)
+/// config error fires (`BadMount` — never going to succeed no matter
+/// how many times we retry). Every other error (TCP refused, Icecast
+/// rejected with 401/403/etc., connection dropped mid-stream)
 /// triggers a backoff + reconnect.
 ///
 /// **Stale-byte drain:** between attempts we drain anything that landed
@@ -271,10 +254,7 @@ pub async fn run_source_with_retry(
 
 /// Errors that retrying can't possibly fix — the request itself is wrong.
 fn is_permanent(err: &StreamError) -> bool {
-    matches!(
-        err,
-        StreamError::LossyContentType(_) | StreamError::BadMount(_)
-    )
+    matches!(err, StreamError::BadMount(_))
 }
 
 async fn read_status_and_headers<R: AsyncReadExt + Unpin>(
@@ -299,7 +279,7 @@ async fn read_status_and_headers<R: AsyncReadExt + Unpin>(
     let text = String::from_utf8_lossy(&buf).into_owned();
     let mut lines = text.split("\r\n");
     let status_line = lines.next().unwrap_or("");
-    // "HTTP/1.1 100 Continue"
+    // "HTTP/1.0 200 OK"
     let status = status_line
         .split_whitespace()
         .nth(1)
@@ -330,15 +310,12 @@ mod tests {
     }
 
     #[test]
-    fn rejects_lossy_content_type() {
-        let cfg = config("/x", "audio/mpeg");
-        let err = cfg.validate().unwrap_err();
-        assert!(matches!(err, StreamError::LossyContentType(_)));
-    }
-
-    #[test]
-    fn accepts_ogg_flac() {
+    fn accepts_any_content_type() {
+        // The content-type is operator-chosen via persona `[stream]`,
+        // not constrained at the source-client layer. mp3, opus, flac,
+        // anything ffmpeg can encode is fair game.
         config("/x", "application/ogg").validate().unwrap();
+        config("/x", "audio/mpeg").validate().unwrap();
         config("/x", "Application/OGG").validate().unwrap();
     }
 
@@ -350,19 +327,21 @@ mod tests {
 
     /// Spin up a fake Icecast that:
     ///  1. accepts the connection
-    ///  2. reads the request headers
-    ///  3. replies "HTTP/1.1 100 Continue"
-    ///  4. reads the chunked body until the terminator
+    ///  2. reads the SOURCE request headers
+    ///  3. replies "HTTP/1.0 200 OK"
+    ///  4. reads raw body bytes until the source closes the channel
     ///
-    /// This is the happy path — verifies our header + chunk framing.
+    /// Verifies the legacy SOURCE wire protocol — no chunked framing,
+    /// no Expect dance, raw bytes after the headers. This is the bug
+    /// fix for the "listeners get HTTP 400" symptom: with chunked
+    /// encoding the framing bytes were getting relayed to listeners.
     #[tokio::test]
-    async fn writes_chunked_body_to_fake_icecast() {
+    async fn writes_raw_source_body_to_fake_icecast() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let server = tokio::spawn(async move {
             let (mut sock, _) = listener.accept().await.unwrap();
-            // Read request headers
             let mut buf = vec![0u8; 4096];
             let mut total = 0;
             loop {
@@ -376,16 +355,20 @@ mod tests {
                 }
             }
             let req = String::from_utf8_lossy(&buf[..total]).into_owned();
-            assert!(req.starts_with("PUT /test HTTP/1.1"));
+            assert!(req.starts_with("SOURCE /test HTTP/1.0"), "got: {req:?}");
             assert!(req.contains("Authorization: Basic "));
-            assert!(req.contains("Content-Type: application/ogg"));
-            assert!(req.contains("Transfer-Encoding: chunked"));
+            assert!(req.contains("Content-Type: audio/mpeg"));
+            assert!(
+                !req.contains("Transfer-Encoding: chunked"),
+                "SOURCE protocol must not advertise chunked encoding"
+            );
+            assert!(
+                !req.contains("Expect: 100-continue"),
+                "SOURCE protocol does not use the Expect/100-Continue dance"
+            );
 
-            sock.write_all(b"HTTP/1.1 100 Continue\r\n\r\n")
-                .await
-                .unwrap();
+            sock.write_all(b"HTTP/1.0 200 OK\r\n\r\n").await.unwrap();
 
-            // Read until socket closes; collect chunked body fragments.
             let mut body = Vec::new();
             loop {
                 let n = sock.read(&mut buf).await.unwrap();
@@ -403,7 +386,7 @@ mod tests {
             user: "source".into(),
             password: "hackme".into(),
             mount: "/test".into(),
-            content_type: "application/ogg".into(),
+            content_type: "audio/mpeg".into(),
             station_name: "test".into(),
             genre: "test".into(),
             description: "test".into(),
@@ -415,10 +398,11 @@ mod tests {
         run_source(cfg, &mut rx).await.unwrap();
 
         let body = server.await.unwrap();
-        let body_s = String::from_utf8_lossy(&body);
-        assert!(body_s.contains("first-frame"));
-        assert!(body_s.contains("second-frame"));
-        assert!(body_s.ends_with("0\r\n\r\n"));
+        assert_eq!(
+            &body[..],
+            b"first-framesecond-frame",
+            "body must be raw bytes — no chunk size markers or framing"
+        );
     }
 
     #[tokio::test]
@@ -493,7 +477,7 @@ mod tests {
                         break;
                     }
                 }
-                sock.write_all(b"HTTP/1.1 100 Continue\r\n\r\n")
+                sock.write_all(b"HTTP/1.0 200 OK\r\n\r\n")
                     .await
                     .unwrap();
                 loop {
@@ -608,7 +592,7 @@ mod tests {
                         break;
                     }
                 }
-                sock.write_all(b"HTTP/1.1 100 Continue\r\n\r\n")
+                sock.write_all(b"HTTP/1.0 200 OK\r\n\r\n")
                     .await
                     .unwrap();
                 loop {

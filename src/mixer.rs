@@ -5,12 +5,8 @@
 //! 1. Picks the next slot (track / break) from the scheduler.
 //! 2. Pre-renders the segment via the LLM + TTS + audio pipeline while
 //!    the current segment is still streaming (queue depth ≥ 1).
-//! 3. Encodes the rendered FLAC into Ogg-framed FLAC and shovels chunks
-//!    into the Icecast source channel.
-//!
-//! Encoding goes through FFmpeg: `ffmpeg -i file.flac -c:a copy -f ogg -`.
-//! `-c:a copy` keeps it lossless — we're just re-muxing the FLAC
-//! bitstream into an Ogg container so Icecast can fan it out.
+//! 3. Encodes the rendered FLAC into the configured stream format and
+//!    shovels chunks into the Icecast source channel.
 
 use crate::audio::{ffmpeg_bin, AudioError};
 use std::path::Path;
@@ -21,36 +17,138 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{debug, info};
 
-/// Encode `flac_path` to Ogg/FLAC and push the bytes into `sink` in
-/// `chunk_size`-sized pieces. Returns when FFmpeg exits.
+/// What we tell Icecast we're sending, and what ffmpeg flags get us
+/// there. Per-persona via `[stream]` in the persona TOML.
 ///
-/// **Real-time pacing:** the `-re` flag tells FFmpeg to read the input
+/// **MP3** — universal listener compatibility, lossy. Default for new
+/// personas. `audio/mpeg`.
+///
+/// **Opus** — modern, efficient, very forgiving of chained-stream
+/// boundaries. Lossy. `application/ogg`.
+///
+/// **OggFlac** — lossless, but: ~1 Mbps, narrow listener support
+/// (no Safari iOS, spotty mobile), and FLAC decoders refuse mid-chain
+/// format changes — so we normalise to a fixed 24-bit / 48 kHz / stereo
+/// shape. `application/ogg`.
+#[derive(Debug, Clone)]
+pub enum StreamFormat {
+    Mp3 { bitrate_kbps: u32 },
+    Opus { bitrate_kbps: u32 },
+    OggFlac,
+}
+
+impl StreamFormat {
+    /// Parse the persona TOML `[stream] format = "…"` + optional
+    /// `bitrate = N` (kbps). Format names are case-insensitive.
+    pub fn parse(name: &str, bitrate_kbps: Option<u32>) -> Result<Self, String> {
+        match name.to_ascii_lowercase().as_str() {
+            "mp3" => Ok(StreamFormat::Mp3 {
+                bitrate_kbps: bitrate_kbps.unwrap_or(256),
+            }),
+            "opus" => Ok(StreamFormat::Opus {
+                bitrate_kbps: bitrate_kbps.unwrap_or(160),
+            }),
+            "flac" | "ogg-flac" | "ogg/flac" => Ok(StreamFormat::OggFlac),
+            other => Err(format!(
+                "unsupported stream format `{other}` — expected one of: mp3, opus, flac"
+            )),
+        }
+    }
+
+    /// Content-Type to advertise on the Icecast source request.
+    pub fn content_type(&self) -> &'static str {
+        match self {
+            StreamFormat::Mp3 { .. } => "audio/mpeg",
+            StreamFormat::Opus { .. } | StreamFormat::OggFlac => "application/ogg",
+        }
+    }
+
+    /// ffmpeg output args — everything after `-i {input}`, ending in `-`
+    /// for stdout. The intermediate format produced by `AudioProcessor`
+    /// (FLAC) is the assumed input.
+    pub fn ffmpeg_encode_args(&self) -> Vec<String> {
+        match self {
+            StreamFormat::Mp3 { bitrate_kbps } => vec![
+                "-ar".into(),
+                "44100".into(),
+                "-ac".into(),
+                "2".into(),
+                "-c:a".into(),
+                "libmp3lame".into(),
+                "-b:a".into(),
+                format!("{bitrate_kbps}k"),
+                "-f".into(),
+                "mp3".into(),
+                "-".into(),
+            ],
+            StreamFormat::Opus { bitrate_kbps } => vec![
+                "-ar".into(),
+                "48000".into(),
+                "-ac".into(),
+                "2".into(),
+                "-c:a".into(),
+                "libopus".into(),
+                "-b:a".into(),
+                format!("{bitrate_kbps}k"),
+                "-vbr".into(),
+                "on".into(),
+                "-f".into(),
+                "ogg".into(),
+                "-".into(),
+            ],
+            StreamFormat::OggFlac => vec![
+                // Normalise to a fixed 24-bit / 48 kHz / stereo shape so
+                // chained Ogg/FLAC streams have identical headers and
+                // listener decoders don't trip on `switching bps
+                // mid-stream is not supported`.
+                "-ar".into(),
+                "48000".into(),
+                "-ac".into(),
+                "2".into(),
+                "-sample_fmt".into(),
+                "s32".into(),
+                "-bits_per_raw_sample".into(),
+                "24".into(),
+                "-c:a".into(),
+                "flac".into(),
+                "-f".into(),
+                "ogg".into(),
+                "-".into(),
+            ],
+        }
+    }
+}
+
+/// Encode `src_path` to the configured `StreamFormat` and push the
+/// bytes into `sink` in `chunk_size`-sized pieces. Returns when ffmpeg
+/// exits.
+///
+/// **Real-time pacing:** the `-re` flag tells ffmpeg to read the input
 /// at its native frame rate, so a 3-minute song takes 3 wall-clock
-/// minutes to pump. Without it, FFmpeg encodes + writes as fast as
-/// the CPU + pipe allow — bytes queue up in `sink`, the producer
-/// races ahead, listeners hear delayed content, and the idle gaps
-/// between back-to-back pumps trigger Icecast's `source-timeout`.
-/// With `-re` the consumer naturally back-pressures the upstream
-/// channel and listeners hear segments at the right pace.
+/// minutes to pump. Without it, ffmpeg encodes + writes as fast as the
+/// CPU + pipe allow — bytes queue up in `sink`, the producer races
+/// ahead, listeners hear delayed content, and the idle gaps between
+/// back-to-back pumps trigger Icecast's `source-timeout`. With `-re`
+/// the consumer naturally back-pressures the upstream channel.
 pub async fn pump_to_icecast(
-    flac_path: &Path,
+    src_path: &Path,
     sink: &mpsc::Sender<Vec<u8>>,
     chunk_size: usize,
+    format: &StreamFormat,
 ) -> Result<(), AudioError> {
+    let path_str = src_path.to_string_lossy().into_owned();
+    let mut args: Vec<String> = vec![
+        "-hide_banner".into(),
+        "-loglevel".into(),
+        "error".into(),
+        "-re".into(),
+        "-i".into(),
+        path_str.clone(),
+    ];
+    args.extend(format.ffmpeg_encode_args());
+
     let mut child = Command::new(ffmpeg_bin())
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-re",
-            "-i",
-            flac_path.to_string_lossy().as_ref(),
-            "-c:a",
-            "copy",
-            "-f",
-            "ogg",
-            "-",
-        ])
+        .args(&args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -63,9 +161,7 @@ pub async fn pump_to_icecast(
         })?;
     let mut stdout = child.stdout.take().expect("ffmpeg stdout");
     // Drain stderr concurrently so ffmpeg can't block on a full stderr
-    // pipe (default ~64KB). Collect for the error report — previously
-    // we returned the literal string "ffmpeg pump failed" with no
-    // signal as to what actually went wrong.
+    // pipe (default ~64 KiB).
     let stderr = child.stderr.take().expect("ffmpeg stderr");
     let stderr_handle: JoinHandle<Vec<u8>> = tokio::spawn(async move {
         let mut buf = Vec::with_capacity(4096);
@@ -74,8 +170,7 @@ pub async fn pump_to_icecast(
         buf
     });
 
-    let path_for_log = flac_path.to_string_lossy().into_owned();
-    debug!(path = %path_for_log, chunk_size, "pump: ffmpeg started");
+    debug!(path = %path_str, ?format, chunk_size, "pump: ffmpeg started");
 
     let mut buf = vec![0u8; chunk_size.max(4096)];
     let mut total_bytes: u64 = 0;
@@ -86,28 +181,20 @@ pub async fn pump_to_icecast(
             break;
         }
         if sink.send(buf[..n].to_vec()).await.is_err() {
-            // downstream closed — abort the ffmpeg child to clean up.
             let _ = child.kill().await;
             break;
         }
         total_bytes += n as u64;
         chunks += 1;
-        // Periodic heartbeat so a stalled run is obvious in the logs.
-        // Every ~1 MiB pumped.
-        if total_bytes.is_multiple_of(1 << 20) || chunks == 1 {
-            debug!(
-                path = %path_for_log,
-                bytes = total_bytes,
-                chunks,
-                "pump: progress"
-            );
+        if chunks == 1 {
+            debug!(path = %path_str, first_chunk_bytes = n, "pump: first bytes out");
         }
     }
     let status = child.wait().await?;
     let stderr_bytes = stderr_handle.await.unwrap_or_default();
     let stderr_text = String::from_utf8_lossy(&stderr_bytes).into_owned();
     info!(
-        path = %path_for_log,
+        path = %path_str,
         bytes = total_bytes,
         chunks,
         exit_code = status.code().unwrap_or(-1),
@@ -131,6 +218,72 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    #[test]
+    fn parses_known_formats_with_defaults() {
+        let mp3 = StreamFormat::parse("mp3", None).unwrap();
+        assert!(matches!(mp3, StreamFormat::Mp3 { bitrate_kbps: 256 }));
+        let opus = StreamFormat::parse("opus", None).unwrap();
+        assert!(matches!(opus, StreamFormat::Opus { bitrate_kbps: 160 }));
+        let flac = StreamFormat::parse("FLAC", None).unwrap();
+        assert!(matches!(flac, StreamFormat::OggFlac));
+        let flac_alt = StreamFormat::parse("ogg-flac", None).unwrap();
+        assert!(matches!(flac_alt, StreamFormat::OggFlac));
+    }
+
+    #[test]
+    fn parse_honors_explicit_bitrate() {
+        let mp3 = StreamFormat::parse("mp3", Some(192)).unwrap();
+        assert!(matches!(mp3, StreamFormat::Mp3 { bitrate_kbps: 192 }));
+        let opus = StreamFormat::parse("opus", Some(96)).unwrap();
+        assert!(matches!(opus, StreamFormat::Opus { bitrate_kbps: 96 }));
+    }
+
+    #[test]
+    fn parse_rejects_unknown_format() {
+        let err = StreamFormat::parse("wav", None).unwrap_err();
+        assert!(err.contains("unsupported stream format"));
+        assert!(err.contains("mp3, opus, flac"));
+    }
+
+    #[test]
+    fn content_type_matches_format() {
+        assert_eq!(
+            StreamFormat::Mp3 { bitrate_kbps: 256 }.content_type(),
+            "audio/mpeg"
+        );
+        assert_eq!(
+            StreamFormat::Opus { bitrate_kbps: 160 }.content_type(),
+            "application/ogg"
+        );
+        assert_eq!(StreamFormat::OggFlac.content_type(), "application/ogg");
+    }
+
+    #[test]
+    fn mp3_encode_args_include_libmp3lame_and_bitrate() {
+        let args = StreamFormat::Mp3 { bitrate_kbps: 192 }.ffmpeg_encode_args();
+        assert!(args.iter().any(|a| a == "libmp3lame"));
+        assert!(args.iter().any(|a| a == "192k"));
+        assert!(args.iter().any(|a| a == "mp3"));
+        assert_eq!(args.last().map(|s| s.as_str()), Some("-"));
+    }
+
+    #[test]
+    fn opus_encode_args_use_libopus_and_ogg_container() {
+        let args = StreamFormat::Opus { bitrate_kbps: 96 }.ffmpeg_encode_args();
+        assert!(args.iter().any(|a| a == "libopus"));
+        assert!(args.iter().any(|a| a == "96k"));
+        assert!(args.iter().any(|a| a == "ogg"));
+    }
+
+    #[test]
+    fn flac_encode_args_normalise_format() {
+        let args = StreamFormat::OggFlac.ffmpeg_encode_args();
+        assert!(args.iter().any(|a| a == "48000"));
+        assert!(args.iter().any(|a| a == "24"));
+        assert!(args.iter().any(|a| a == "flac"));
+        assert!(args.iter().any(|a| a == "ogg"));
+    }
+
     /// Both subprocess error paths (binary missing, binary fails) are
     /// asserted in a single test so the shared `FFMPEG_BIN` env var
     /// doesn't race against itself when `cargo test` parallelizes.
@@ -140,13 +293,14 @@ mod tests {
         let p = tmp.path().join("dummy.flac");
         std::fs::write(&p, b"not-really-flac").unwrap();
         let (tx, _rx) = mpsc::channel::<Vec<u8>>(1);
+        let fmt = StreamFormat::Mp3 { bitrate_kbps: 128 };
 
         std::env::set_var("FFMPEG_BIN", "/nope/nope/nope/ffmpeg");
-        let err = pump_to_icecast(&p, &tx, 1024).await.unwrap_err();
+        let err = pump_to_icecast(&p, &tx, 1024, &fmt).await.unwrap_err();
         assert!(matches!(err, AudioError::FfmpegMissing));
 
         std::env::set_var("FFMPEG_BIN", "/bin/false");
-        let err = pump_to_icecast(&p, &tx, 1024).await.unwrap_err();
+        let err = pump_to_icecast(&p, &tx, 1024, &fmt).await.unwrap_err();
         assert!(matches!(err, AudioError::FfmpegFailed { .. }));
 
         std::env::remove_var("FFMPEG_BIN");
