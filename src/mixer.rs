@@ -18,6 +18,8 @@ use std::process::Stdio;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+use tracing::{debug, info};
 
 /// Encode `flac_path` to Ogg/FLAC and push the bytes into `sink` in
 /// `chunk_size`-sized pieces. Returns when FFmpeg exits.
@@ -60,7 +62,24 @@ pub async fn pump_to_icecast(
             }
         })?;
     let mut stdout = child.stdout.take().expect("ffmpeg stdout");
+    // Drain stderr concurrently so ffmpeg can't block on a full stderr
+    // pipe (default ~64KB). Collect for the error report — previously
+    // we returned the literal string "ffmpeg pump failed" with no
+    // signal as to what actually went wrong.
+    let stderr = child.stderr.take().expect("ffmpeg stderr");
+    let stderr_handle: JoinHandle<Vec<u8>> = tokio::spawn(async move {
+        let mut buf = Vec::with_capacity(4096);
+        let mut reader = stderr;
+        let _ = reader.read_to_end(&mut buf).await;
+        buf
+    });
+
+    let path_for_log = flac_path.to_string_lossy().into_owned();
+    debug!(path = %path_for_log, chunk_size, "pump: ffmpeg started");
+
     let mut buf = vec![0u8; chunk_size.max(4096)];
+    let mut total_bytes: u64 = 0;
+    let mut chunks: u64 = 0;
     loop {
         let n = stdout.read(&mut buf).await?;
         if n == 0 {
@@ -71,12 +90,37 @@ pub async fn pump_to_icecast(
             let _ = child.kill().await;
             break;
         }
+        total_bytes += n as u64;
+        chunks += 1;
+        // Periodic heartbeat so a stalled run is obvious in the logs.
+        // Every ~1 MiB pumped.
+        if total_bytes.is_multiple_of(1 << 20) || chunks == 1 {
+            debug!(
+                path = %path_for_log,
+                bytes = total_bytes,
+                chunks,
+                "pump: progress"
+            );
+        }
     }
     let status = child.wait().await?;
+    let stderr_bytes = stderr_handle.await.unwrap_or_default();
+    let stderr_text = String::from_utf8_lossy(&stderr_bytes).into_owned();
+    info!(
+        path = %path_for_log,
+        bytes = total_bytes,
+        chunks,
+        exit_code = status.code().unwrap_or(-1),
+        "pump: ffmpeg exited"
+    );
     if !status.success() {
         return Err(AudioError::FfmpegFailed {
             code: status.code().unwrap_or(-1),
-            stderr: "ffmpeg pump failed".into(),
+            stderr: if stderr_text.is_empty() {
+                "ffmpeg pump failed (no stderr captured)".into()
+            } else {
+                stderr_text
+            },
         });
     }
     Ok(())

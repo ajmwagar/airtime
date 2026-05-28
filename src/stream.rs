@@ -85,6 +85,7 @@ pub async fn run_source(
 ) -> Result<(), StreamError> {
     cfg.validate()?;
     let addr = format!("{}:{}", cfg.host, cfg.port);
+    tracing::debug!(addr = %addr, mount = %cfg.mount, "source: connecting");
     let stream = tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(&addr))
         .await
         .map_err(|_| {
@@ -93,6 +94,7 @@ pub async fn run_source(
                 "connect timed out",
             ))
         })??;
+    tracing::debug!(addr = %addr, "source: tcp connected");
     let (rd, mut wr) = stream.into_split();
 
     // Headers: PUT /mount HTTP/1.1 + Basic + Icy metadata.
@@ -122,11 +124,35 @@ pub async fn run_source(
     );
     wr.write_all(req.as_bytes()).await?;
     wr.flush().await?;
+    tracing::debug!(mount = %cfg.mount, "source: request headers sent, waiting for response");
 
     // Read the response status line + headers. Icecast replies with
     // `HTTP/1.1 100 Continue` on success; anything else is a rejection.
+    //
+    // Bound the wait — if Icecast doesn't speak Expect/100-Continue
+    // and is sitting silent waiting for body, the body-write loop
+    // will never run and listeners hear nothing. 10s is generous;
+    // anything longer is a bug to surface, not patience to reward.
     let mut rdr = BufReader::new(rd);
-    let (status, body_preview) = read_status_and_headers(&mut rdr).await?;
+    let (status, body_preview) = match tokio::time::timeout(
+        Duration::from_secs(10),
+        read_status_and_headers(&mut rdr),
+    )
+    .await
+    {
+        Ok(r) => r?,
+        Err(_) => {
+            return Err(StreamError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "icecast did not respond to request headers within 10s",
+            )));
+        }
+    };
+    tracing::info!(
+        mount = %cfg.mount,
+        status,
+        "source: icecast response received"
+    );
     if !(status == 100 || status == 200) {
         return Err(StreamError::Rejected {
             status,
@@ -136,6 +162,9 @@ pub async fn run_source(
 
     // Pump chunks. Each `Vec<u8>` from the channel becomes one HTTP
     // chunk. An empty terminator is sent when the channel closes.
+    let mut total_bytes: u64 = 0;
+    let mut chunks: u64 = 0;
+    let mut next_log_threshold: u64 = 1 << 20; // log every 1 MiB
     while let Some(chunk) = body.recv().await {
         if chunk.is_empty() {
             continue;
@@ -145,9 +174,34 @@ pub async fn run_source(
         wr.write_all(&chunk).await?;
         wr.write_all(b"\r\n").await?;
         wr.flush().await?;
+
+        total_bytes += chunk.len() as u64;
+        chunks += 1;
+        if chunks == 1 {
+            tracing::info!(
+                mount = %cfg.mount,
+                first_chunk_bytes = chunk.len(),
+                "source: first body chunk written"
+            );
+        }
+        if total_bytes >= next_log_threshold {
+            tracing::debug!(
+                mount = %cfg.mount,
+                bytes = total_bytes,
+                chunks,
+                "source: streaming progress"
+            );
+            next_log_threshold = total_bytes + (1 << 20);
+        }
     }
     wr.write_all(b"0\r\n\r\n").await?;
     wr.flush().await?;
+    tracing::info!(
+        mount = %cfg.mount,
+        bytes = total_bytes,
+        chunks,
+        "source: body channel closed, sent chunked terminator"
+    );
     Ok(())
 }
 
