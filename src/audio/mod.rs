@@ -91,9 +91,13 @@ impl AudioProcessor {
     /// Generate a silent FLAC at `temp_dir/silence-{secs}s.flac` if it
     /// doesn't already exist, returning the path. Used by the consumer
     /// as Icecast keepalive during idle periods (empty library,
-    /// in-flight skill render). Mono, 24 kHz — matches Kokoro's
-    /// output rate so the silent stream interleaves cleanly with
-    /// real TTS segments.
+    /// in-flight skill render).
+    ///
+    /// 48 kHz / stereo to match `pump_to_icecast`'s normalised output
+    /// format — if silence and music landed on the wire with different
+    /// rates/channel counts, the listener's FLAC decoder would refuse
+    /// the cross-stream switch (`switching bps mid-stream is not
+    /// supported`).
     pub async fn ensure_silence(&self, duration_secs: u64) -> Result<PathBuf, AudioError> {
         tokio::fs::create_dir_all(&self.temp_dir).await?;
         let out = self.temp_dir.join(format!("silence-{duration_secs}s.flac"));
@@ -105,9 +109,13 @@ impl AudioProcessor {
             "-f",
             "lavfi",
             "-i",
-            "anullsrc=r=24000:cl=mono",
+            "anullsrc=r=48000:cl=stereo",
             "-t",
             &duration_secs.to_string(),
+            "-sample_fmt",
+            "s32",
+            "-bits_per_raw_sample",
+            "24",
             "-c:a",
             "flac",
             out.to_string_lossy().as_ref(),

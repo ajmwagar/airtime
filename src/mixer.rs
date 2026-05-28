@@ -32,6 +32,22 @@ use tracing::{debug, info};
 /// between back-to-back pumps trigger Icecast's `source-timeout`.
 /// With `-re` the consumer naturally back-pressures the upstream
 /// channel and listeners hear segments at the right pace.
+///
+/// **Format normalisation (24-bit / 48 kHz / stereo):** every call
+/// spawns a fresh ffmpeg → fresh Ogg stream. When chained on the wire,
+/// listener decoders see "stream A ends, stream B begins" — and FLAC
+/// decoders explicitly refuse mid-chain changes in bits-per-sample
+/// (`switching bps mid-stream is not supported`). The Kokoro TTS
+/// segments are 16-bit / 24 kHz / mono; music can be 16- or 24-bit /
+/// 44.1 or 48 kHz / stereo. Re-encoding every segment to a fixed
+/// 24-bit / 48 kHz / stereo FLAC means every chained Ogg page has
+/// identical headers and decoders glide right through. FLAC is
+/// lossless, so the re-encode is too — bit-depth upconversion 16→24
+/// just zero-pads, mono→stereo duplicates, and 24/44.1 → 24/48 kHz
+/// resampling uses soxr (transparent for radio listening). The only
+/// real cost is 96/192 kHz hi-res sources getting downsampled to 48
+/// kHz; bringing those back losslessly would mean per-listener
+/// negotiation, which Icecast doesn't do.
 pub async fn pump_to_icecast(
     flac_path: &Path,
     sink: &mpsc::Sender<Vec<u8>>,
@@ -45,8 +61,18 @@ pub async fn pump_to_icecast(
             "-re",
             "-i",
             flac_path.to_string_lossy().as_ref(),
+            // Normalise every segment to one stable format so chained
+            // Ogg/FLAC pages have identical headers. See doc comment.
+            "-ar",
+            "48000",
+            "-ac",
+            "2",
+            "-sample_fmt",
+            "s32",
+            "-bits_per_raw_sample",
+            "24",
             "-c:a",
-            "copy",
+            "flac",
             "-f",
             "ogg",
             "-",
