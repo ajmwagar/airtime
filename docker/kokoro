@@ -35,6 +35,9 @@ def main() -> int:
     samples, sample_rate = kokoro.create(
         text, voice=args.voice, speed=args.speed, lang=args.lang
     )
+    # Flatten samples if 2D (kokoro-onnx returns (1, N) shape)
+    if samples.ndim > 1:
+        samples = samples.flatten()
     sf.write(args.out, samples, sample_rate)
     return 0
 

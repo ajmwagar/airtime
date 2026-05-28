@@ -39,9 +39,10 @@
 
     <paths>
         <basedir>/usr/share/icecast2</basedir>
-        <logdir>/var/log/icecast2</logdir>
+        <logdir>/tmp</logdir>
         <webroot>/usr/share/icecast2/web</webroot>
         <adminroot>/usr/share/icecast2/admin</adminroot>
+        <x-forwarded-for>127.0.0.1</x-forwarded-for>
         <alias source="/" destination="/status.xsl"/>
     </paths>
 

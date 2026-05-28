@@ -1,0 +1,4 @@
+# Kokoro TTS models - too large for git
+*.onnx
+*.bin
+voices.json

@@ -1,0 +1,48 @@
+# Minimal airtime compose — Icecast + Airtime only (no Ollama)
+# For local dev without the 3.8GB Ollama download.
+#
+# Usage:
+#   docker compose -f compose.minimal.yaml up -d
+#
+# Listen at: http://localhost:8001/donna
+# Status:     http://localhost:8001/status.xsl
+
+services:
+  icecast:
+    image: moul/icecast:latest
+    container_name: airtime-icecast
+    restart: unless-stopped
+    ports:
+      - "8001:8000"
+    volumes:
+      - ./docker/icecast.xml:/etc/icecast2/icecast.xml:ro
+      - type: tmpfs
+        target: /var/log/icecast2
+        tmpfs:
+          size: 100M
+
+  airtime:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: airtime
+    restart: unless-stopped
+    depends_on:
+      - icecast
+    environment:
+      RUST_LOG: "info,airtime=debug"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      TOMTOM_API_KEY: "${TOMTOM_API_KEY:-}"
+      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
+      # Point to host Ollama if you have it running locally
+      OLLAMA_HOST: "host.docker.internal:11434"
+    volumes:
+      - ./music:/music:ro
+      - ./models:/app/models:ro
+      - ./personas:/app/personas:ro
+      - airtime-tmp:/tmp/airtime
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  airtime-tmp:

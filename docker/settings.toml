@@ -23,14 +23,14 @@ model    = "claude-sonnet-4-20250514"
 # uncommenting and setting `llm_backend = "openrouter"` on the skills
 # that should route here. API key via OPENROUTER_API_KEY env var
 # (forwarded by compose).
-# [openrouter]
-# model = "anthropic/claude-3.5-sonnet"
+[openrouter]
+model = "google/gemini-2.0-flash-001"
 
 [kokoro]
 # Model files are mounted at /app/models — drop kokoro-v1.0.onnx and
 # voices.bin into ./models on the host and they'll appear here.
 model_path  = "/app/models/kokoro-v1.0.onnx"
-voices_path = "/app/models/voices.bin"
+voices_path = "/app/models/voices.json"
 sample_rate = 24000
 binary      = "/usr/local/bin/kokoro"
 

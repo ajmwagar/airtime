@@ -16,14 +16,14 @@ model    = "claude-sonnet-4-20250514"
 # non-local models (Gemini, Llama, Mistral, etc.) under a single API key.
 # Enable by uncommenting and setting `llm_backend = "openrouter"` on the
 # skills you want to route there. API key via OPENROUTER_API_KEY env var.
-# [openrouter]
-# model = "anthropic/claude-3.5-sonnet"
+[openrouter]
+model = "google/gemini-flash-1.5"
 
 [kokoro]
 model_path  = "./models/kokoro-v1.0.onnx"
 voices_path = "./models/voices.bin"
 sample_rate = 24000
-# binary  = "./bin/kokoro"   # uncomment if not on PATH
+binary  = "./docker/kokoro"   # local kokoro shim
 
 [library]
 path          = "/music"
