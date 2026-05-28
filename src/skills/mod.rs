@@ -87,4 +87,55 @@ mod tests {
         let skills = build_enabled(&SkillToggles::default());
         assert!(skills.is_empty());
     }
+
+    /// Per-skill time-of-hour scoring. These lock in the slotting rules
+    /// so a refactor can't silently slide `top_of_hour` away from the
+    /// top of the hour, etc.
+    #[test]
+    fn top_of_hour_locked_to_first_five_minutes() {
+        let s = TopOfHourSkill;
+        assert!(s.time_score(0) > 0);
+        assert!(s.time_score(4) > 0);
+        assert_eq!(s.time_score(5), 0);
+        assert_eq!(s.time_score(30), 0);
+    }
+
+    #[test]
+    fn station_id_prefers_quarter_marks() {
+        let s = StationIdSkill;
+        let base = s.time_score(8);
+        for m in [15, 30, 45] {
+            assert!(
+                s.time_score(m) > base,
+                "minute {m} should outscore baseline"
+            );
+        }
+    }
+
+    #[test]
+    fn weather_prefers_pre_news_and_post_news_windows() {
+        let s = WeatherSkill;
+        let base = s.time_score(10);
+        for m in [25, 55] {
+            assert!(s.time_score(m) > base, "minute {m} should beat baseline");
+        }
+    }
+
+    #[test]
+    fn traffic_prefers_weather_adjacent_slots() {
+        let s = TrafficSkill;
+        let base = s.time_score(10);
+        for m in [22, 52] {
+            assert!(s.time_score(m) > base, "minute {m} should beat baseline");
+        }
+    }
+
+    #[test]
+    fn baseline_skills_eligible_anywhere() {
+        // fake_ad + caller stay at baseline — they're filler.
+        for m in [0, 7, 15, 33, 59] {
+            assert!(FakeAdSkill.time_score(m) > 0);
+            assert!(CallerSkill.time_score(m) > 0);
+        }
+    }
 }

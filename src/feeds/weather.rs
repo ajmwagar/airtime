@@ -53,14 +53,8 @@ impl WeatherFetcher {
             .get("temperature")
             .and_then(|v| v.as_f64())
             .ok_or_else(|| WeatherError::Malformed("no temperature".into()))?;
-        let wind_kph = cw
-            .get("windspeed")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-        let code = cw
-            .get("weathercode")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(-1);
+        let wind_kph = cw.get("windspeed").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let code = cw.get("weathercode").and_then(|v| v.as_i64()).unwrap_or(-1);
         Ok(WeatherNow {
             temperature_c,
             wind_kph,

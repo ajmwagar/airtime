@@ -1,6 +1,8 @@
 //! `track_intro` — DJ introduces the upcoming track.
 
-use super::base::{render_segment, system_prompt, Skill, SkillContext, SkillError, SkillOutput, SkillRuntime};
+use super::base::{
+    render_segment, system_prompt, Skill, SkillContext, SkillError, SkillOutput, SkillRuntime,
+};
 use async_trait::async_trait;
 
 pub struct TrackIntroSkill;

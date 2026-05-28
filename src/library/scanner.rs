@@ -83,8 +83,38 @@ impl MusicLibrary {
         guard.choose(&mut rand::thread_rng()).cloned()
     }
 
+    /// Random pick that avoids anything in `history`. If the entire
+    /// library is in the history window (which can happen when the
+    /// library is smaller than `TrackHistory` capacity), falls back to a
+    /// plain random pick rather than refusing to return anything.
+    pub async fn pick_random_avoiding(
+        &self,
+        history: &super::history::TrackHistory,
+    ) -> Option<Track> {
+        let guard = self.inner.read().await;
+        if guard.is_empty() {
+            return None;
+        }
+        let fresh: Vec<&Track> = guard
+            .iter()
+            .filter(|t| !history.contains(&t.path))
+            .collect();
+        let pool = if fresh.is_empty() {
+            guard.iter().collect::<Vec<_>>()
+        } else {
+            fresh
+        };
+        pool.choose(&mut rand::thread_rng()).map(|t| (*t).clone())
+    }
+
     pub async fn all(&self) -> Vec<Track> {
         self.inner.read().await.clone()
+    }
+
+    /// Test-only: bypass the filesystem walk and seed the index directly.
+    #[cfg(test)]
+    pub async fn seed_for_test(&self, tracks: Vec<Track>) {
+        *self.inner.write().await = tracks;
     }
 }
 
@@ -205,5 +235,53 @@ mod tests {
     async fn pick_random_returns_none_when_empty() {
         let lib = MusicLibrary::new();
         assert!(lib.pick_random().await.is_none());
+    }
+
+    fn fake_track(path: &str) -> Track {
+        Track {
+            path: PathBuf::from(path),
+            title: path.into(),
+            artist: "x".into(),
+            album: "x".into(),
+            year: None,
+            genre: None,
+            label: None,
+            duration_ms: 0,
+            format: "flac".into(),
+            sample_rate: None,
+            bit_depth: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn pick_random_avoiding_skips_history() {
+        let lib = MusicLibrary::new();
+        lib.seed_for_test(vec![fake_track("/a.flac"), fake_track("/b.flac")])
+            .await;
+        let mut hist = super::super::history::TrackHistory::new(8);
+        hist.record(PathBuf::from("/a.flac"));
+        // With /a in history, only /b is fresh — must always be picked.
+        for _ in 0..10 {
+            let pick = lib.pick_random_avoiding(&hist).await.unwrap();
+            assert_eq!(pick.path, PathBuf::from("/b.flac"));
+        }
+    }
+
+    #[tokio::test]
+    async fn pick_random_avoiding_falls_back_when_history_covers_library() {
+        let lib = MusicLibrary::new();
+        lib.seed_for_test(vec![fake_track("/a.flac")]).await;
+        let mut hist = super::super::history::TrackHistory::new(8);
+        hist.record(PathBuf::from("/a.flac"));
+        // Only track is in history → fallback path returns it anyway.
+        let pick = lib.pick_random_avoiding(&hist).await.unwrap();
+        assert_eq!(pick.path, PathBuf::from("/a.flac"));
+    }
+
+    #[tokio::test]
+    async fn pick_random_avoiding_empty_library_returns_none() {
+        let lib = MusicLibrary::new();
+        let hist = super::super::history::TrackHistory::new(8);
+        assert!(lib.pick_random_avoiding(&hist).await.is_none());
     }
 }

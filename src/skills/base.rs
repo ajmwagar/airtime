@@ -44,6 +44,17 @@ pub enum SkillError {
     Audio(#[from] crate::audio::AudioError),
 }
 
+/// Score returned by `Skill::time_score` for skills that are happy to
+/// run at any minute of the hour.
+pub const SKILL_SCORE_BASELINE: i32 = 10;
+/// Skill prefers this slot but isn't strictly tied to it.
+pub const SKILL_SCORE_PREFERRED: i32 = 50;
+/// Skill is strongly tied to this slot (e.g. `top_of_hour` at minute 0).
+pub const SKILL_SCORE_REQUIRED: i32 = 100;
+/// Used to suppress a skill at a given minute — the scheduler treats
+/// non-positive scores as "not eligible right now".
+pub const SKILL_SCORE_SUPPRESSED: i32 = 0;
+
 #[async_trait]
 pub trait Skill: Send + Sync {
     fn name(&self) -> &'static str;
@@ -58,6 +69,16 @@ pub trait Skill: Send + Sync {
     /// track_outro). The scheduler uses this to gate scheduling.
     fn needs_track(&self) -> bool {
         false
+    }
+
+    /// How well this skill fits the current minute of the hour (0..60).
+    ///
+    /// `SKILL_SCORE_BASELINE` means "fine any time"; the scheduler picks
+    /// the highest-scoring eligible skill and falls back to baseline
+    /// candidates when nothing scores higher. Returning
+    /// `SKILL_SCORE_SUPPRESSED` (or less) means "skip me at this minute".
+    fn time_score(&self, _minute: u32) -> i32 {
+        SKILL_SCORE_BASELINE
     }
 }
 

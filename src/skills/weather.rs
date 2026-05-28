@@ -1,6 +1,9 @@
 //! `weather` — quick local conditions read.
 
-use super::base::{render_segment, system_prompt, Skill, SkillContext, SkillError, SkillOutput, SkillRuntime};
+use super::base::{
+    render_segment, system_prompt, Skill, SkillContext, SkillError, SkillOutput, SkillRuntime,
+    SKILL_SCORE_BASELINE, SKILL_SCORE_PREFERRED,
+};
 use async_trait::async_trait;
 
 pub struct WeatherSkill;
@@ -9,6 +12,16 @@ pub struct WeatherSkill;
 impl Skill for WeatherSkill {
     fn name(&self) -> &'static str {
         "weather"
+    }
+
+    /// Prefer the post-news / pre-hour windows where a weather read sits
+    /// naturally — around :25 (after a top-of-hour news flow) and :55
+    /// (running up to the next top-of-hour).
+    fn time_score(&self, minute: u32) -> i32 {
+        match minute {
+            24..=27 | 54..=58 => SKILL_SCORE_PREFERRED,
+            _ => SKILL_SCORE_BASELINE,
+        }
     }
 
     async fn generate(

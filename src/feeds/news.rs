@@ -215,10 +215,7 @@ mod tests {
             .await;
 
         let fetcher = NewsFetcher::new();
-        let sources = vec![
-            "http://127.0.0.1:1/nope".to_string(),
-            server.uri(),
-        ];
+        let sources = vec!["http://127.0.0.1:1/nope".to_string(), server.uri()];
         let items = fetcher.fetch_all(&sources).await;
         assert_eq!(items.len(), 3);
     }

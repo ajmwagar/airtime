@@ -38,6 +38,14 @@ The original spec was written for Python; this port translates the architecture 
 - [x] Example personas (`personas/donna.toml`, `personas/mitch.toml`)
 - [x] `settings.toml` global config
 
+## Post-Phase-1 Improvements
+
+- [x] Pre-render pipeline — `Producer`/`Consumer` split over `mpsc<PlayItem>` (`pipeline`)
+- [x] Time-aware scheduling — `Skill::time_score(minute)` + scheduler picks best fit
+- [x] Track-repeat avoidance — `TrackHistory` ring buffer + `pick_random_avoiding`
+- [x] Empty-library backoff — producer sleeps instead of spin-looping
+- [x] GitHub Actions CI — `cargo test`/`clippy`/`fmt` + `docker build` smoke test
+
 ## Out of Scope (Phase 1)
 
 Agentic SMS control, in-car Si4713 module, line-in passthrough, Cloudflare Tunnel sharing, royalty reporting, Web UI, secondary Kokoro instance for caller voice.

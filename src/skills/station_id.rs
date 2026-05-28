@@ -1,6 +1,9 @@
 //! `station_id` — short imager. "You're listening to KFLT…"
 
-use super::base::{render_segment, system_prompt, Skill, SkillContext, SkillError, SkillOutput, SkillRuntime};
+use super::base::{
+    render_segment, system_prompt, Skill, SkillContext, SkillError, SkillOutput, SkillRuntime,
+    SKILL_SCORE_BASELINE, SKILL_SCORE_PREFERRED,
+};
 use async_trait::async_trait;
 
 pub struct StationIdSkill;
@@ -9,6 +12,15 @@ pub struct StationIdSkill;
 impl Skill for StationIdSkill {
     fn name(&self) -> &'static str {
         "station_id"
+    }
+
+    /// Drop near the quarter-hour marks (:15, :30, :45) — classic radio
+    /// imager cadence. Still eligible at baseline elsewhere.
+    fn time_score(&self, minute: u32) -> i32 {
+        match minute {
+            14..=16 | 29..=31 | 44..=46 => SKILL_SCORE_PREFERRED,
+            _ => SKILL_SCORE_BASELINE,
+        }
     }
 
     async fn generate(

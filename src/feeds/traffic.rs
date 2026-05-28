@@ -98,10 +98,7 @@ mod tests {
             .await;
 
         let fetcher = TrafficFetcher::with_base_url(server.uri(), "test-key");
-        let out = fetcher
-            .fetch((-122.5, 47.4, -122.0, 47.8))
-            .await
-            .unwrap();
+        let out = fetcher.fetch((-122.5, 47.4, -122.0, 47.8)).await.unwrap();
         assert_eq!(out.incidents, 2);
         assert_eq!(out.summary, "2 incidents reported.");
     }

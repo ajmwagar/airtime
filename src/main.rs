@@ -4,11 +4,11 @@
 use airtime::audio::AudioProcessor;
 use airtime::config::{Persona, Settings};
 use airtime::feeds::{news::NewsFetcher, weather::WeatherFetcher, FeedCache};
-use airtime::library::MusicLibrary;
+use airtime::library::{MusicLibrary, TrackHistory};
 use airtime::llm::{claude::ClaudeClient, ollama::OllamaClient, LlmRouter};
-use airtime::mixer::pump_to_icecast;
-use airtime::scheduler::{SegmentScheduler, SlotKind};
-use airtime::skills::{build_enabled, SkillContext, SkillRuntime};
+use airtime::pipeline::{run_consumer, LocalClock, PlayItem, Producer};
+use airtime::scheduler::SegmentScheduler;
+use airtime::skills::{build_enabled, SkillRuntime};
 use airtime::stream::{run_source, SourceConfig};
 use airtime::tts::KokoroTts;
 use anyhow::{Context, Result};
@@ -27,24 +27,30 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let settings_path = std::env::var("AIRTIME_SETTINGS").unwrap_or_else(|_| "settings.toml".into());
-    let settings = Arc::new(Settings::load(&settings_path).with_context(|| {
-        format!("loading settings from {settings_path}")
-    })?);
+    let settings_path =
+        std::env::var("AIRTIME_SETTINGS").unwrap_or_else(|_| "settings.toml".into());
+    let settings = Arc::new(
+        Settings::load(&settings_path)
+            .with_context(|| format!("loading settings from {settings_path}"))?,
+    );
     info!(
         path = %settings_path,
         "settings loaded"
     );
 
     // Build the shared LLM router + TTS engine + audio processor.
-    let ollama = Arc::new(OllamaClient::new(&settings.ollama.base_url, &settings.ollama.model));
-    let claude: Arc<dyn airtime::llm::LlmBackend> = match ClaudeClient::from_env(&settings.claude.model) {
-        Ok(c) => Arc::new(c),
-        Err(_) => {
-            warn!("ANTHROPIC_API_KEY not set — claude backend will return errors");
-            Arc::new(NoopBackend("ANTHROPIC_API_KEY missing"))
-        }
-    };
+    let ollama = Arc::new(OllamaClient::new(
+        &settings.ollama.base_url,
+        &settings.ollama.model,
+    ));
+    let claude: Arc<dyn airtime::llm::LlmBackend> =
+        match ClaudeClient::from_env(&settings.claude.model) {
+            Ok(c) => Arc::new(c),
+            Err(_) => {
+                warn!("ANTHROPIC_API_KEY not set — claude backend will return errors");
+                Arc::new(NoopBackend("ANTHROPIC_API_KEY missing"))
+            }
+        };
     let llm = Arc::new(LlmRouter::new(ollama, claude));
 
     let tts_bin = settings
@@ -126,11 +132,7 @@ async fn main() -> Result<()> {
 struct NoopBackend(&'static str);
 #[async_trait::async_trait]
 impl airtime::llm::LlmBackend for NoopBackend {
-    async fn complete(
-        &self,
-        _system: &str,
-        _user: &str,
-    ) -> Result<String, airtime::llm::LlmError> {
+    async fn complete(&self, _system: &str, _user: &str) -> Result<String, airtime::llm::LlmError> {
         Err(airtime::llm::LlmError::Malformed(self.0.into()))
     }
 }
@@ -201,9 +203,22 @@ async fn run_station(
     library: MusicLibrary,
     feeds: FeedCache,
 ) -> Result<()> {
-    info!(callsign = %persona.host.callsign, mount = %persona.stream.mount, "station starting");
+    info!(
+        callsign = %persona.host.callsign,
+        mount = %persona.stream.mount,
+        "station starting"
+    );
 
+    // Three channels make up the audio chain:
+    //   [Producer] --PlayItem--> [Consumer] --raw bytes--> [Icecast source]
+    //
+    // The PlayItem channel is bounded at depth 2 — enough for the
+    // producer to keep one segment ahead of the consumer (the spec's
+    // "queue depth ≥ 1") without unbounded memory growth if the network
+    // back-pressures.
+    let (item_tx, item_rx) = mpsc::channel::<PlayItem>(2);
     let (audio_tx, audio_rx) = mpsc::channel::<Vec<u8>>(64);
+
     let cfg = SourceConfig {
         host: settings.icecast.host.clone(),
         port: settings.icecast.port,
@@ -222,69 +237,30 @@ async fn run_station(
         }
     });
 
-    let skills = build_enabled(&persona.host.skills);
-    let mut scheduler = SegmentScheduler::new(skills, 3);
+    let consumer_audio_tx = audio_tx.clone();
+    let consumer_task = tokio::spawn(async move {
+        run_consumer(item_rx, consumer_audio_tx, 16 * 1024).await;
+    });
 
-    loop {
-        let slot = scheduler.peek_next();
-        let ctx = SkillContext {
-            persona: persona.clone(),
-            track: library.pick_random().await,
-            feeds: feeds.snapshot().await,
-        };
-        match slot {
-            SlotKind::Track => {
-                let (intro, outro) = scheduler.track_skills();
-                if let Some(intro) = intro {
-                    if ctx.track.is_some() {
-                        render_and_push(&intro, &ctx, &rt, &audio_tx).await;
-                    }
-                }
-                if let Some(track) = ctx.track.as_ref() {
-                    if let Err(e) = pump_to_icecast(&track.path, &audio_tx, 16 * 1024).await {
-                        warn!(error = %e, "failed to stream track");
-                    }
-                }
-                if let Some(outro) = outro {
-                    if ctx.track.is_some() {
-                        render_and_push(&outro, &ctx, &rt, &audio_tx).await;
-                    }
-                }
-                scheduler.note_track_played();
-            }
-            SlotKind::Break => {
-                if let Some(skill) = scheduler.next_break_skill() {
-                    render_and_push(&skill, &ctx, &rt, &audio_tx).await;
-                }
-            }
-        }
+    let scheduler = SegmentScheduler::new(build_enabled(&persona.host.skills), 3);
+    let producer = Producer {
+        persona,
+        library,
+        feeds,
+        runtime: rt,
+        scheduler,
+        history: TrackHistory::default(),
+        clock: Arc::new(LocalClock),
+        empty_library_backoff: Duration::from_secs(30),
+    };
 
-        if audio_tx.is_closed() {
-            warn!("icecast channel closed — exiting station loop");
-            break;
-        }
+    let producer_result = producer.run(item_tx).await;
+    if let Err(e) = producer_result {
+        warn!(error = %e, "producer exited");
     }
+
+    drop(audio_tx);
+    let _ = consumer_task.await;
     src_task.abort();
     Ok(())
-}
-
-async fn render_and_push(
-    skill: &Arc<dyn airtime::skills::Skill>,
-    ctx: &SkillContext,
-    rt: &SkillRuntime,
-    audio_tx: &mpsc::Sender<Vec<u8>>,
-) {
-    match skill.generate(ctx, rt).await {
-        Ok(output) => {
-            info!(
-                segment = output.segment_type,
-                duration_ms = output.duration_ms,
-                "segment rendered"
-            );
-            if let Err(e) = pump_to_icecast(&output.audio_path, audio_tx, 16 * 1024).await {
-                warn!(error = %e, "failed to stream segment");
-            }
-        }
-        Err(e) => warn!(skill = skill.name(), error = %e, "skill failed"),
-    }
 }

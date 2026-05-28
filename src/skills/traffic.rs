@@ -1,6 +1,9 @@
 //! `traffic` — local incident summary read.
 
-use super::base::{render_segment, system_prompt, Skill, SkillContext, SkillError, SkillOutput, SkillRuntime};
+use super::base::{
+    render_segment, system_prompt, Skill, SkillContext, SkillError, SkillOutput, SkillRuntime,
+    SKILL_SCORE_BASELINE, SKILL_SCORE_PREFERRED,
+};
 use async_trait::async_trait;
 
 pub struct TrafficSkill;
@@ -9,6 +12,15 @@ pub struct TrafficSkill;
 impl Skill for TrafficSkill {
     fn name(&self) -> &'static str {
         "traffic"
+    }
+
+    /// Traffic reads pair with the weather windows on radio — :22ish and
+    /// :52ish are the canonical "weather and traffic" slots.
+    fn time_score(&self, minute: u32) -> i32 {
+        match minute {
+            21..=24 | 51..=54 => SKILL_SCORE_PREFERRED,
+            _ => SKILL_SCORE_BASELINE,
+        }
     }
 
     async fn generate(

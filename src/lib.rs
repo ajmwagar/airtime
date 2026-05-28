@@ -10,6 +10,7 @@ pub mod feeds;
 pub mod library;
 pub mod llm;
 pub mod mixer;
+pub mod pipeline;
 pub mod scheduler;
 pub mod skills;
 pub mod stream;

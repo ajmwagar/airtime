@@ -144,11 +144,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = ClaudeClient::with_base_url(
-            server.uri(),
-            "claude-sonnet-4-20250514",
-            "sk-test",
-        );
+        let client =
+            ClaudeClient::with_base_url(server.uri(), "claude-sonnet-4-20250514", "sk-test");
         let out = client.complete("be brief", "intro me").await.unwrap();
         assert_eq!(out, "good evening, Seattle");
     }
@@ -164,11 +161,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = ClaudeClient::with_base_url(
-            server.uri(),
-            "claude-sonnet-4-20250514",
-            "sk-test",
-        );
+        let client =
+            ClaudeClient::with_base_url(server.uri(), "claude-sonnet-4-20250514", "sk-test");
         let err = client.complete("s", "u").await.unwrap_err();
         assert!(matches!(err, LlmError::Malformed(_)));
     }

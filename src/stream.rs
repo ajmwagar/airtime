@@ -41,8 +41,8 @@ pub enum StreamError {
 /// Lossless content-types we'll let through. The chain has to be Ogg-framed
 /// or Icecast won't fan it out correctly to listeners.
 const LOSSLESS_CTYPES: &[&str] = &[
-    "application/ogg",  // Ogg/FLAC, Ogg/Vorbis (Vorbis is lossy — see filter below).
-    "audio/flac",       // Native FLAC (no Ogg framing) — not all Icecast builds like it; here for completeness.
+    "application/ogg", // Ogg/FLAC, Ogg/Vorbis (Vorbis is lossy — see filter below).
+    "audio/flac", // Native FLAC (no Ogg framing) — not all Icecast builds like it; here for completeness.
 ];
 
 /// Source client configuration.
@@ -85,10 +85,12 @@ pub async fn run_source(
     let addr = format!("{}:{}", cfg.host, cfg.port);
     let stream = tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(&addr))
         .await
-        .map_err(|_| StreamError::Io(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            "connect timed out",
-        )))??;
+        .map_err(|_| {
+            StreamError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "connect timed out",
+            ))
+        })??;
     let (rd, mut wr) = stream.into_split();
 
     // Headers: PUT /mount HTTP/1.1 + Basic + Icy metadata.
@@ -250,7 +252,9 @@ mod tests {
             assert!(req.contains("Content-Type: application/ogg"));
             assert!(req.contains("Transfer-Encoding: chunked"));
 
-            sock.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").await.unwrap();
+            sock.write_all(b"HTTP/1.1 100 Continue\r\n\r\n")
+                .await
+                .unwrap();
 
             // Read until socket closes; collect chunked body fragments.
             let mut body = Vec::new();
@@ -297,11 +301,9 @@ mod tests {
             let (mut sock, _) = listener.accept().await.unwrap();
             let mut buf = [0u8; 4096];
             let _ = sock.read(&mut buf).await;
-            sock.write_all(
-                b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n",
-            )
-            .await
-            .unwrap();
+            sock.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .unwrap();
         });
 
         let cfg = SourceConfig {
