@@ -197,21 +197,84 @@ async fn send(tx: &mpsc::Sender<PlayItem>, item: PlayItem) -> Result<(), Pipelin
     tx.send(item).await.map_err(|_| PipelineError::Closed)
 }
 
+/// Silence-fill keepalive — pump a short silent FLAC into the source
+/// channel whenever the producer has nothing for us. Without this,
+/// Icecast's `source-timeout` (10s default) drops the source connection
+/// during empty-library backoff or long skill renders, the retry loop
+/// reconnects (briefly hearable as a "Broken pipe" warning), and
+/// listeners get a glitch. With keepalive the source stays up and
+/// listeners hear quiet.
+///
+/// Disabled (`None`) means "exit on producer drop, no silence" — the
+/// pre-keepalive behaviour, useful in tests.
+#[derive(Debug, Clone)]
+pub struct KeepaliveConfig {
+    pub silence_path: PathBuf,
+    pub idle_after: Duration,
+}
+
+/// Consumer-side configuration. Holds the chunk size we hand to ffmpeg
+/// and the optional silence-keepalive policy.
+#[derive(Debug, Clone)]
+pub struct ConsumerConfig {
+    pub chunk_size: usize,
+    pub keepalive: Option<KeepaliveConfig>,
+}
+
 /// Consumer side: drain `PlayItem`s, hand each to `pump_to_icecast`.
 ///
-/// One-bug-budget: if a single segment fails to encode (corrupt file,
+/// `pump_to_icecast` itself paces via `ffmpeg -re`, so the consumer is
+/// rate-limited to real-time naturally; no playback-clock tracking
+/// needed here. When the producer has nothing for us, we wait
+/// `keepalive.idle_after`; on timeout we pump the pre-rendered silence
+/// file (also paced by `-re`, so the idle loop doesn't spin).
+///
+/// One-bug budget: if a single segment fails to encode (corrupt file,
 /// ffmpeg missing for a moment, etc.) we log and continue — gapping a
 /// segment is better than tearing down the whole station task.
 pub async fn run_consumer(
     mut rx: mpsc::Receiver<PlayItem>,
     icecast_tx: mpsc::Sender<Vec<u8>>,
-    chunk_size: usize,
+    config: ConsumerConfig,
 ) {
-    while let Some(item) = rx.recv().await {
-        debug!(label = %item.label, duration_ms = item.duration_ms, "pumping");
-        if let Err(e) = pump_to_icecast(&item.path, &icecast_tx, chunk_size).await {
-            warn!(label = %item.label, error = %e, "pump failed — skipping segment");
+    loop {
+        // With keepalive enabled, fall through to silence on timeout.
+        // Without, block forever waiting for the next item.
+        let next = match &config.keepalive {
+            Some(ka) => tokio::time::timeout(ka.idle_after, rx.recv()).await,
+            None => Ok(rx.recv().await),
+        };
+
+        match next {
+            Ok(Some(item)) => {
+                debug!(label = %item.label, duration_ms = item.duration_ms, "pumping");
+                if let Err(e) = pump_to_icecast(&item.path, &icecast_tx, config.chunk_size).await {
+                    warn!(label = %item.label, error = %e, "pump failed — skipping segment");
+                }
+            }
+            Ok(None) => {
+                // Producer dropped its sender — graceful shutdown.
+                return;
+            }
+            Err(_elapsed) => {
+                // Idle window elapsed without an item. Pump silence to
+                // keep the Icecast source connection alive. Real-time
+                // paced via `-re`, so this takes `silence` wall-clock
+                // seconds per loop iteration rather than spinning.
+                if let Some(ka) = &config.keepalive {
+                    debug!(
+                        idle_secs = ka.idle_after.as_secs(),
+                        "pumping silence keepalive"
+                    );
+                    if let Err(e) =
+                        pump_to_icecast(&ka.silence_path, &icecast_tx, config.chunk_size).await
+                    {
+                        warn!(error = %e, "silence pump failed");
+                    }
+                }
+            }
         }
+
         if icecast_tx.is_closed() {
             warn!("icecast channel closed — consumer exiting");
             return;
