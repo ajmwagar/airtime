@@ -13,6 +13,38 @@ by name. Occasionally wistful. Never hurried.
 # `[host.skill_config.X].llm_backend` inherits this. Unset → "ollama".
 default_llm_backend = "openrouter"
 
+# Imperial units — Donna's a Seattle host so she'll say "fifty-three
+# degrees Fahrenheit, wind eight miles per hour" instead of metric.
+# Set to "metric" for everywhere else.
+units = "imperial"
+
+# Music cadence outside any daypart — one talk break every N tracks.
+# Day-parts below can override per-window.
+tracks_per_break = 3
+
+# Day-parted programming. First matching window wins (so keep them
+# non-overlapping). `hours = "22-04"` wraps midnight; "06-09" is
+# half-open: 6, 7, 8 (not 9). `extra_tone` is appended to the
+# system prompt for that window only — Donna sounds different at
+# 2 AM than at noon.
+[[host.dayparts]]
+name = "late_night"
+hours = "22-04"
+tracks_per_break = 5
+extra_tone = """
+Late-night drive vibe. Hushed, intimate, for the night-shift cats
+and the lone commuters. Talk less, let the records breathe.
+"""
+
+[[host.dayparts]]
+name = "afternoon"
+hours = "13-17"
+tracks_per_break = 3
+extra_tone = """
+Sunny-afternoon energy. A little more buoyant, a little more
+chatty. The lunch crowd is back at their desks; keep them company.
+"""
+
 [host.skills]
 track_intro  = true
 track_outro  = true

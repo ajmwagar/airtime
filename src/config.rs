@@ -158,11 +158,120 @@ pub struct Host {
     pub audio: HostAudio,
     /// Persona-wide default LLM backend. Skills inherit this when their
     /// own `[host.skill_config.X].llm_backend` is unset. If this is also
-    /// unset, the ultimate fallback is `"ollama"`. Set once at the
-    /// `[host]` level to avoid having to declare `llm_backend` on every
-    /// enabled skill.
+    /// unset, the ultimate fallback is `"ollama"`.
     #[serde(default)]
     pub default_llm_backend: Option<String>,
+    /// Music tracks between non-track segments (default cadence). A
+    /// daypart can override this — see `[[host.dayparts]]`.
+    #[serde(default = "default_tracks_per_break")]
+    pub tracks_per_break: usize,
+    /// `"imperial"` or `"metric"` — controls every measurement the host
+    /// speaks aloud (currently temperature + wind, future: distance,
+    /// pressure). Defaults to imperial because most US-based stations
+    /// want that; flip to `"metric"` for everywhere else. Always
+    /// spelled out by the skills (`"degrees Fahrenheit"`, `"miles per
+    /// hour"`) — Kokoro pronounces abbreviations badly.
+    #[serde(default = "default_units")]
+    pub units: String,
+    /// Day-part programming — different tracks-per-break cadences and
+    /// tonal overlays depending on the hour. First matching daypart
+    /// wins (so overlap is operator's problem). Empty means "same
+    /// programming all day."
+    #[serde(default)]
+    pub dayparts: Vec<Daypart>,
+}
+
+fn default_tracks_per_break() -> usize {
+    3
+}
+
+fn default_units() -> String {
+    "imperial".into()
+}
+
+impl Host {
+    /// `true` if the persona has selected imperial units.
+    pub fn imperial(&self) -> bool {
+        self.units.eq_ignore_ascii_case("imperial")
+    }
+}
+
+/// A time-of-day programming block. `hours` is a comma-separated list
+/// of `HH-HH` ranges, end-exclusive (`"06-09"` covers 6, 7, 8). Ranges
+/// can wrap midnight: `"22-04"` covers 22, 23, 0, 1, 2, 3.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Daypart {
+    pub name: String,
+    pub hours: String,
+    /// Override `host.tracks_per_break` during this daypart.
+    #[serde(default)]
+    pub tracks_per_break: Option<usize>,
+    /// Tone overlay appended to the system prompt — gives the host a
+    /// distinct vibe per daypart without rewriting their persona.
+    #[serde(default)]
+    pub extra_tone: Option<String>,
+}
+
+/// Check whether `hour` (0..24) falls inside `spec`'s ranges.
+///
+/// `spec` syntax: comma-separated `HH-HH` half-open ranges; end may be
+/// smaller than start to indicate a midnight wrap. Malformed entries
+/// are silently ignored — operator should see them at config-parse
+/// time once we surface a validation pass.
+pub fn hours_contain(spec: &str, hour: u32) -> bool {
+    for range in spec.split(',') {
+        let range = range.trim();
+        let Some((s, e)) = range.split_once('-') else {
+            continue;
+        };
+        let Ok(start) = s.trim().parse::<u32>() else {
+            continue;
+        };
+        let Ok(end) = e.trim().parse::<u32>() else {
+            continue;
+        };
+        let hit = if start < end {
+            hour >= start && hour < end
+        } else if start > end {
+            // wraps midnight
+            hour >= start || hour < end
+        } else {
+            // start == end → empty / full-day depending on convention.
+            // Treat as empty (operator can write "00-24" for full day).
+            false
+        };
+        if hit {
+            return true;
+        }
+    }
+    false
+}
+
+impl Host {
+    /// Find the current daypart for `hour` (0..24). First match wins,
+    /// per declaration order in the TOML.
+    pub fn current_daypart(&self, hour: u32) -> Option<&Daypart> {
+        self.dayparts.iter().find(|d| hours_contain(&d.hours, hour))
+    }
+
+    /// `tracks_per_break` taking the active daypart into account.
+    pub fn tracks_per_break_at(&self, hour: u32) -> usize {
+        self.current_daypart(hour)
+            .and_then(|d| d.tracks_per_break)
+            .unwrap_or(self.tracks_per_break)
+    }
+}
+
+/// Celsius → Fahrenheit. The weather feed returns C; we present in
+/// whichever unit the persona asked for.
+pub fn celsius_to_fahrenheit(c: f64) -> f64 {
+    c * 9.0 / 5.0 + 32.0
+}
+
+/// Kilometres-per-hour → miles-per-hour. Open-Meteo's `windspeed` is
+/// km/h; persona-side we convert when imperial.
+pub fn kph_to_mph(kph: f64) -> f64 {
+    kph * 0.621_371
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

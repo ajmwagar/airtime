@@ -23,7 +23,7 @@ impl Skill for CallerSkill {
         rt: &SkillRuntime,
     ) -> Result<SkillOutput, SkillError> {
         let cfg = ctx.persona.skill_config(self.name());
-        let system = system_prompt(&ctx.persona);
+        let system = system_prompt(ctx);
         let user = format!(
             "Write a short fake call-in segment. Introduce the caller (give them a name and \
              vibe), have them say something brief and odd, then react in your voice. Keep both \

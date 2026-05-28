@@ -19,7 +19,7 @@ impl Skill for FakeAdSkill {
         rt: &SkillRuntime,
     ) -> Result<SkillOutput, SkillError> {
         let cfg = ctx.persona.skill_config(self.name());
-        let system = system_prompt(&ctx.persona);
+        let system = system_prompt(ctx);
         let user = format!(
             "Write a 30-second parody radio ad spot for a fictional product or business in the \
              style of GTA Radio. Be over-the-top, era-appropriate, and slightly absurd. End with \

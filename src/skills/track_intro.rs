@@ -31,7 +31,7 @@ impl Skill for TrackIntroSkill {
             }
         };
         let cfg = ctx.persona.skill_config(self.name());
-        let system = system_prompt(&ctx.persona);
+        let system = system_prompt(ctx);
         let year = track
             .year
             .map(|y| y.to_string())

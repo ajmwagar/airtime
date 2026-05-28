@@ -477,9 +477,7 @@ mod tests {
                         break;
                     }
                 }
-                sock.write_all(b"HTTP/1.0 200 OK\r\n\r\n")
-                    .await
-                    .unwrap();
+                sock.write_all(b"HTTP/1.0 200 OK\r\n\r\n").await.unwrap();
                 loop {
                     let r = sock.read(&mut buf).await.unwrap();
                     if r == 0 {
@@ -592,9 +590,7 @@ mod tests {
                         break;
                     }
                 }
-                sock.write_all(b"HTTP/1.0 200 OK\r\n\r\n")
-                    .await
-                    .unwrap();
+                sock.write_all(b"HTTP/1.0 200 OK\r\n\r\n").await.unwrap();
                 loop {
                     let r = sock.read(&mut buf).await.unwrap();
                     if r == 0 {

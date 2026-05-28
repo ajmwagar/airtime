@@ -30,25 +30,69 @@ impl Skill for WeatherSkill {
         rt: &SkillRuntime,
     ) -> Result<SkillOutput, SkillError> {
         let cfg = ctx.persona.skill_config(self.name());
-        let system = system_prompt(&ctx.persona);
+        let system = system_prompt(ctx);
         let user = match ctx.feeds.weather.as_ref() {
-            Some(w) => format!(
-                "Weather right now: {temp:.0}°C, {cond}, wind {wind:.0} kph. \
-                 Give a short weather read in your voice. Max {max} words. Spoken naturally.",
-                temp = w.temperature_c,
-                cond = w.conditions,
-                wind = w.wind_kph,
-                max = cfg.max_words,
-            ),
+            Some(w) => {
+                // Open-Meteo gives us metric (°C, km/h). Convert and
+                // spell out the unit name based on the persona's
+                // `units` setting. Kokoro reads "kph" as "K, P, H"
+                // and "mph" as "M, P, H" — both bad — so always
+                // write the words out.
+                let (temp_str, temp_unit, wind_str, wind_unit) = if ctx.persona.host.imperial() {
+                    (
+                        format!(
+                            "{:.0}",
+                            crate::config::celsius_to_fahrenheit(w.temperature_c)
+                        ),
+                        "Fahrenheit",
+                        format!("{:.0}", crate::config::kph_to_mph(w.wind_kph)),
+                        "miles per hour",
+                    )
+                } else {
+                    (
+                        format!("{:.0}", w.temperature_c),
+                        "Celsius",
+                        format!("{:.0}", w.wind_kph),
+                        "kilometers per hour",
+                    )
+                };
+                format!(
+                    "Weather read in your voice. Right now: {temp_str} degrees {temp_unit}, \
+                     {cond}, wind {wind_str} {wind_unit}. Max {max} words.",
+                    cond = w.conditions,
+                    max = cfg.max_words,
+                )
+            }
             None => format!(
-                "We don't have a fresh weather reading. Improvise a brief, \
-                 honest weather mention (without making up numbers). \
-                 Max {} words.",
+                "No weather data — improvise honestly, no fake numbers. Max {} words.",
                 cfg.max_words
             ),
         };
         let backend = ctx.persona.resolve_llm_backend(self.name());
         let script = rt.llm.complete(&system, &user, &backend).await?;
         render_segment(rt, &ctx.persona, script, "weather").await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::config::{celsius_to_fahrenheit, kph_to_mph};
+
+    /// Conversions have to be right: the whole point of
+    /// persona-configurable units is the right number lands in the
+    /// LLM prompt. 20 °C = 68 °F. 100 km/h ≈ 62 mph.
+    #[test]
+    fn celsius_to_fahrenheit_conversion() {
+        assert_eq!(celsius_to_fahrenheit(0.0).round() as i32, 32);
+        assert_eq!(celsius_to_fahrenheit(20.0).round() as i32, 68);
+        assert_eq!(celsius_to_fahrenheit(100.0).round() as i32, 212);
+        assert_eq!(celsius_to_fahrenheit(-40.0).round() as i32, -40);
+    }
+
+    #[test]
+    fn kph_to_mph_conversion() {
+        assert_eq!(kph_to_mph(0.0).round() as i32, 0);
+        assert_eq!(kph_to_mph(100.0).round() as i32, 62);
+        assert_eq!(kph_to_mph(50.0).round() as i32, 31);
     }
 }

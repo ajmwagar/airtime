@@ -28,7 +28,7 @@ impl Skill for TrackOutroSkill {
             ))
         })?;
         let cfg = ctx.persona.skill_config(self.name());
-        let system = system_prompt(&ctx.persona);
+        let system = system_prompt(ctx);
         let user = format!(
             "That was \"{title}\" by {artist}. Write a short outro reflecting on the track. \
              Max {max} words. Spoken naturally.",

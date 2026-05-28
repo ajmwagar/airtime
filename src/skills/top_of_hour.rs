@@ -24,13 +24,21 @@ impl Skill for TopOfHourSkill {
         }
     }
 
+    /// News at the top of the hour is the canonical hour-anchor skill:
+    /// if a long track straddles `:00–:04` and we miss the window, the
+    /// scheduler should fire us as soon as the track ends instead of
+    /// skipping the hour entirely.
+    fn must_fire_per_hour(&self) -> bool {
+        true
+    }
+
     async fn generate(
         &self,
         ctx: &SkillContext,
         rt: &SkillRuntime,
     ) -> Result<SkillOutput, SkillError> {
         let cfg = ctx.persona.skill_config(self.name());
-        let system = system_prompt(&ctx.persona);
+        let system = system_prompt(ctx);
         let headlines = if ctx.feeds.news.is_empty() {
             "(no headlines available)".to_string()
         } else {
