@@ -77,9 +77,11 @@ impl SourceConfig {
 /// from `body` into the socket until the channel closes.
 ///
 /// Returns when the channel closes cleanly or the connection drops.
+/// Borrows the receiver (rather than consuming it) so the caller can
+/// reuse it across reconnect attempts — see [`run_source_with_retry`].
 pub async fn run_source(
     cfg: SourceConfig,
-    mut body: mpsc::Receiver<Vec<u8>>,
+    body: &mut mpsc::Receiver<Vec<u8>>,
 ) -> Result<(), StreamError> {
     cfg.validate()?;
     let addr = format!("{}:{}", cfg.host, cfg.port);
@@ -149,6 +151,78 @@ pub async fn run_source(
     Ok(())
 }
 
+/// Retry policy for [`run_source_with_retry`].
+#[derive(Debug, Clone, Copy)]
+pub struct RetryPolicy {
+    pub initial_backoff: Duration,
+    pub max_backoff: Duration,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            initial_backoff: Duration::from_secs(1),
+            max_backoff: Duration::from_secs(60),
+        }
+    }
+}
+
+/// Wrap [`run_source`] in an exponential-backoff retry loop.
+///
+/// Loops until the channel closes cleanly (clean exit) or a permanent
+/// config error fires (`LossyContentType`, `BadMount` — those will never
+/// succeed no matter how many times we retry). Every other error
+/// (TCP refused, Icecast rejected, connection dropped mid-stream)
+/// triggers a backoff + reconnect.
+///
+/// **Stale-byte drain:** between attempts we drain anything that landed
+/// in `body` during the disconnect. Those bytes are partial Ogg frames
+/// from a stream the new source connection won't represent — feeding
+/// them into the next `run_source` would start the new connection
+/// mid-frame and produce a corrupted stream for listeners. Brief audio
+/// gap on reconnect is the lesser evil.
+pub async fn run_source_with_retry(
+    cfg: SourceConfig,
+    mut body: mpsc::Receiver<Vec<u8>>,
+    policy: RetryPolicy,
+) -> Result<(), StreamError> {
+    let mut backoff = policy.initial_backoff;
+    loop {
+        match run_source(cfg.clone(), &mut body).await {
+            Ok(()) => return Ok(()),
+            Err(e) if is_permanent(&e) => return Err(e),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    backoff_secs = backoff.as_secs(),
+                    "icecast source dropped — reconnecting"
+                );
+                // Drain stale bytes that buffered during the disconnect.
+                let mut dropped = 0usize;
+                while body.try_recv().is_ok() {
+                    dropped += 1;
+                }
+                if dropped > 0 {
+                    tracing::debug!(
+                        dropped_chunks = dropped,
+                        "dropped stale audio chunks before reconnecting"
+                    );
+                }
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(policy.max_backoff);
+            }
+        }
+    }
+}
+
+/// Errors that retrying can't possibly fix — the request itself is wrong.
+fn is_permanent(err: &StreamError) -> bool {
+    matches!(
+        err,
+        StreamError::LossyContentType(_) | StreamError::BadMount(_)
+    )
+}
+
 async fn read_status_and_headers<R: AsyncReadExt + Unpin>(
     rdr: &mut R,
 ) -> Result<(u16, String), StreamError> {
@@ -183,6 +257,7 @@ async fn read_status_and_headers<R: AsyncReadExt + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use tokio::io::AsyncWriteExt;
     use tokio::net::TcpListener;
 
@@ -279,11 +354,11 @@ mod tests {
             genre: "test".into(),
             description: "test".into(),
         };
-        let (tx, rx) = mpsc::channel(4);
+        let (tx, mut rx) = mpsc::channel(4);
         tx.send(b"first-frame".to_vec()).await.unwrap();
         tx.send(b"second-frame".to_vec()).await.unwrap();
         drop(tx);
-        run_source(cfg, rx).await.unwrap();
+        run_source(cfg, &mut rx).await.unwrap();
 
         let body = server.await.unwrap();
         let body_s = String::from_utf8_lossy(&body);
@@ -317,11 +392,224 @@ mod tests {
             genre: "test".into(),
             description: "test".into(),
         };
-        let (_tx, rx) = mpsc::channel(1);
-        let err = run_source(cfg, rx).await.unwrap_err();
+        let (_tx, mut rx) = mpsc::channel(1);
+        let err = run_source(cfg, &mut rx).await.unwrap_err();
         match err {
             StreamError::Rejected { status, .. } => assert_eq!(status, 401),
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    /// Server refuses the first two connections (drops the socket
+    /// immediately) then accepts the third. The retry wrapper should
+    /// loop with backoff until the connection succeeds and the body
+    /// makes it through.
+    #[tokio::test]
+    async fn retry_reconnects_until_icecast_accepts() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let attempts = Arc::new(AtomicUsize::new(0));
+
+        let attempts_srv = attempts.clone();
+        let server = tokio::spawn(async move {
+            // Drain bytes from a successful third connection so we can
+            // verify the test was end-to-end.
+            let mut body = Vec::new();
+            loop {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let n = attempts_srv.fetch_add(1, Ordering::SeqCst);
+                if n < 2 {
+                    // Hostile drop without sending any response — the
+                    // client sees this as EOF mid-handshake.
+                    drop(sock);
+                    continue;
+                }
+                // Third connection: accept properly.
+                let mut buf = vec![0u8; 4096];
+                let mut total = 0;
+                loop {
+                    let r = sock.read(&mut buf[total..]).await.unwrap();
+                    if r == 0 {
+                        break;
+                    }
+                    total += r;
+                    if buf[..total].windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                sock.write_all(b"HTTP/1.1 100 Continue\r\n\r\n")
+                    .await
+                    .unwrap();
+                loop {
+                    let r = sock.read(&mut buf).await.unwrap();
+                    if r == 0 {
+                        break;
+                    }
+                    body.extend_from_slice(&buf[..r]);
+                }
+                return body;
+            }
+        });
+
+        let cfg = SourceConfig {
+            host: addr.ip().to_string(),
+            port: addr.port(),
+            user: "source".into(),
+            password: "hackme".into(),
+            mount: "/test".into(),
+            content_type: "application/ogg".into(),
+            station_name: "test".into(),
+            genre: "test".into(),
+            description: "test".into(),
+        };
+        // Pushing the chunk before retry runs would risk it being drained
+        // out between attempts. Spawn the retry first, wait for the first
+        // two failures to elapse, then push the chunk so attempt #3 has
+        // something to ship.
+        let (tx, rx) = mpsc::channel(4);
+        let policy = RetryPolicy {
+            initial_backoff: Duration::from_millis(5),
+            max_backoff: Duration::from_millis(50),
+        };
+        let cfg_clone = cfg.clone();
+        let retry_task =
+            tokio::spawn(async move { run_source_with_retry(cfg_clone, rx, policy).await });
+
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        tx.send(b"after-retry".to_vec()).await.unwrap();
+        drop(tx);
+
+        retry_task.await.unwrap().unwrap();
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        let body = server.await.unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("after-retry"));
+    }
+
+    /// Permanent errors (bad mount, lossy content-type) must not be
+    /// retried — they'd loop forever, since no amount of waiting fixes
+    /// a malformed config.
+    #[tokio::test]
+    async fn retry_does_not_loop_on_permanent_errors() {
+        let cfg = SourceConfig {
+            host: "127.0.0.1".into(),
+            port: 0,
+            user: "source".into(),
+            password: "hackme".into(),
+            mount: "no-leading-slash".into(),
+            content_type: "application/ogg".into(),
+            station_name: "test".into(),
+            genre: "test".into(),
+            description: "test".into(),
+        };
+        let (_tx, rx) = mpsc::channel(1);
+        let err = run_source_with_retry(
+            cfg,
+            rx,
+            RetryPolicy {
+                initial_backoff: Duration::from_secs(60), // would deadlock the test if we retried
+                max_backoff: Duration::from_secs(60),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, StreamError::BadMount(_)));
+    }
+
+    /// Bytes that buffered into the channel during a disconnect must be
+    /// dropped before the next reconnect attempt — feeding them into
+    /// the new source would start the new Ogg stream mid-frame.
+    #[tokio::test]
+    async fn retry_drains_stale_bytes_between_attempts() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let attempts = Arc::new(AtomicUsize::new(0));
+
+        let attempts_srv = attempts.clone();
+        let server = tokio::spawn(async move {
+            let mut second_body = Vec::new();
+            loop {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let n = attempts_srv.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    // First connection: drop without 100 Continue —
+                    // client sees `Closed`, retry engages.
+                    drop(sock);
+                    continue;
+                }
+                // Second connection: accept + drain.
+                let mut buf = vec![0u8; 4096];
+                let mut total = 0;
+                loop {
+                    let r = sock.read(&mut buf[total..]).await.unwrap();
+                    if r == 0 {
+                        break;
+                    }
+                    total += r;
+                    if buf[..total].windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                sock.write_all(b"HTTP/1.1 100 Continue\r\n\r\n")
+                    .await
+                    .unwrap();
+                loop {
+                    let r = sock.read(&mut buf).await.unwrap();
+                    if r == 0 {
+                        break;
+                    }
+                    second_body.extend_from_slice(&buf[..r]);
+                }
+                return second_body;
+            }
+        });
+
+        let cfg = SourceConfig {
+            host: addr.ip().to_string(),
+            port: addr.port(),
+            user: "source".into(),
+            password: "hackme".into(),
+            mount: "/test".into(),
+            content_type: "application/ogg".into(),
+            station_name: "test".into(),
+            genre: "test".into(),
+            description: "test".into(),
+        };
+        let (tx, rx) = mpsc::channel(16);
+        // Push two STALE chunks. The first attempt may consume some of
+        // them before dying; the rest are stranded in the channel and
+        // must be dropped before the retry succeeds.
+        tx.send(b"STALE-1".to_vec()).await.unwrap();
+        tx.send(b"STALE-2".to_vec()).await.unwrap();
+
+        let policy = RetryPolicy {
+            initial_backoff: Duration::from_millis(20),
+            max_backoff: Duration::from_millis(50),
+        };
+        let cfg_clone = cfg.clone();
+        let retry_task =
+            tokio::spawn(async move { run_source_with_retry(cfg_clone, rx, policy).await });
+
+        // After the first failed attempt + drain, push a fresh chunk
+        // that should reach the second connection.
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        tx.send(b"FRESH".to_vec()).await.unwrap();
+        drop(tx);
+
+        retry_task.await.unwrap().unwrap();
+        let body = server.await.unwrap();
+        let body_s = String::from_utf8_lossy(&body);
+        assert!(
+            body_s.contains("FRESH"),
+            "fresh chunk should reach second connection"
+        );
+        assert!(
+            !body_s.contains("STALE"),
+            "stale chunks must be dropped on retry"
+        );
     }
 }
