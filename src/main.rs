@@ -11,7 +11,7 @@ use airtime::llm::{
 use airtime::pipeline::{run_consumer, LocalClock, PlayItem, Producer};
 use airtime::scheduler::SegmentScheduler;
 use airtime::skills::{build_enabled, SkillRuntime};
-use airtime::stream::{run_source, SourceConfig};
+use airtime::stream::{run_source_with_retry, RetryPolicy, SourceConfig};
 use airtime::tts::KokoroTts;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
@@ -250,8 +250,10 @@ async fn run_station(
     };
 
     let src_task = tokio::spawn(async move {
-        if let Err(e) = run_source(cfg, audio_rx).await {
-            error!(error = %e, "icecast source dropped");
+        if let Err(e) = run_source_with_retry(cfg, audio_rx, RetryPolicy::default()).await {
+            // Only fires on permanent config errors (bad mount, lossy
+            // content-type). Network drops are retried internally.
+            error!(error = %e, "icecast source permanently failed");
         }
     });
 
