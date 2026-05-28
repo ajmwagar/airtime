@@ -18,6 +18,14 @@ model    = "llama3.1:8b"
 model    = "claude-sonnet-4-20250514"
 # API key via ANTHROPIC_API_KEY env var (forwarded by compose).
 
+# Optional: OpenRouter gateway — gives a single key + endpoint access to
+# hundreds of upstream models (Gemini, Llama, Mistral, …). Enable by
+# uncommenting and setting `llm_backend = "openrouter"` on the skills
+# that should route here. API key via OPENROUTER_API_KEY env var
+# (forwarded by compose).
+# [openrouter]
+# model = "anthropic/claude-3.5-sonnet"
+
 [kokoro]
 # Model files are mounted at /app/models — drop kokoro-v1.0.onnx and
 # voices.bin into ./models on the host and they'll appear here.
