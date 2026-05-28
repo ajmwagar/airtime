@@ -4,7 +4,11 @@
 # BuildKit cache mounts persist the cargo registry + target dir across
 # rebuilds, so iterative builds only recompile what changed. Falls back
 # to a normal (uncached) build on legacy Docker clients.
-FROM rust:1.83-bookworm AS builder
+#
+# Rust 1.85+ is required: a transitive dep (`hashbrown 0.17`) needs
+# `edition2024`, stabilized in 1.85. Bumping forward should be safe;
+# bumping back below 1.85 will fail the cargo build inside this stage.
+FROM rust:1.85-bookworm AS builder
 
 WORKDIR /build
 
