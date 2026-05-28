@@ -1,0 +1,73 @@
+# airtime compose stack — local-host development setup.
+#
+# Usage:
+#   docker compose up -d icecast ollama
+#   docker compose exec ollama ollama pull llama3.1:8b      # one-time
+#   # drop kokoro-v1.0.onnx + voices.bin into ./models
+#   # drop FLAC/WAV files into ./music
+#   docker compose up airtime
+#
+# Listen at: http://localhost:8000/donna   (and any other persona mount)
+# Status:     http://localhost:8000/status.xsl
+
+services:
+  icecast:
+    image: libretime/icecast:2.4.4
+    container_name: airtime-icecast
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./docker/icecast.xml:/etc/icecast.xml:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8000/status.xsl || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: airtime-ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  airtime:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: airtime
+    restart: unless-stopped
+    depends_on:
+      icecast:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    environment:
+      RUST_LOG: "info,airtime=debug"
+      # Optional secrets — pass through from the host shell or `.env`.
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      TOMTOM_API_KEY: "${TOMTOM_API_KEY:-}"
+    volumes:
+      # Lossless music library — drop FLAC/WAV files here.
+      - ./music:/music:ro
+      # Kokoro TTS model + voices (download separately).
+      - ./models:/app/models:ro
+      # Persona TOMLs — bind the host copy so you can edit on the host.
+      - ./personas:/app/personas:ro
+      # Optional: override the in-image settings.toml.
+      # - ./settings.toml:/app/settings.toml:ro
+      - airtime-tmp:/tmp/airtime
+
+volumes:
+  ollama-data:
+  airtime-tmp:

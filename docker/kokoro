@@ -1,0 +1,43 @@
+#!/usr/bin/env python3
+"""Kokoro TTS subprocess shim.
+
+Matches the CLI interface that airtime's `KokoroTts` wrapper expects:
+
+    kokoro --model PATH --voices PATH --voice NAME --out PATH
+        (text from stdin → WAV at --out)
+
+Wraps `kokoro_onnx.Kokoro` for CPU inference. Sample rate is 24 kHz —
+the rest of the airtime pipeline up-samples losslessly via ffmpeg.
+"""
+import argparse
+import sys
+
+import soundfile as sf
+from kokoro_onnx import Kokoro
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", required=True, help="path to kokoro-v1.0.onnx")
+    parser.add_argument("--voices", required=True, help="path to voices.bin")
+    parser.add_argument("--voice", required=True, help="voice id, e.g. af_heart")
+    parser.add_argument("--out", required=True, help="WAV output path")
+    parser.add_argument("--lang", default="en-us")
+    parser.add_argument("--speed", type=float, default=1.0)
+    args = parser.parse_args()
+
+    text = sys.stdin.read().strip()
+    if not text:
+        print("kokoro shim: empty text on stdin", file=sys.stderr)
+        return 2
+
+    kokoro = Kokoro(args.model, args.voices)
+    samples, sample_rate = kokoro.create(
+        text, voice=args.voice, speed=args.speed, lang=args.lang
+    )
+    sf.write(args.out, samples, sample_rate)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

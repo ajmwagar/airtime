@@ -61,3 +61,38 @@ Agentic SMS control, in-car Si4713 module, line-in passthrough, Cloudflare Tunne
 - Each station owns one tokio task graph; stations are isolated from each other.
 - The mixer pre-renders the next segment while the current one plays (queue depth ≥ 1).
 - Feeds are cached and refreshed on independent schedules.
+
+## Running it in Docker
+
+`Dockerfile` + `compose.yaml` ship a three-service stack: `airtime`, `icecast` (libretime/icecast image), `ollama`. Build context uses BuildKit cache mounts for the Rust target dir — first build is slow, subsequent builds are fast.
+
+```bash
+# 1. Boot the infrastructure first so airtime has somewhere to push to / call out to.
+docker compose up -d icecast ollama
+
+# 2. One-time: pull the LLM model. The compose service exec's into the running container.
+docker compose exec ollama ollama pull llama3.1:8b
+
+# 3. Drop your assets into the bind-mounted host dirs:
+mkdir -p music models
+# - ./music/         lossless FLAC/WAV files (any folder structure)
+# - ./models/        kokoro-v1.0.onnx + voices.bin
+#   (download from https://github.com/thewh1teagle/kokoro-onnx releases)
+
+# 4. Build and run airtime.
+docker compose up -d --build airtime
+
+# 5. Listen — once airtime starts producing segments:
+#    http://localhost:8000/donna
+#    http://localhost:8000/mitch
+#    http://localhost:8000/status.xsl     (server-side mount list)
+```
+
+Override the default config via an `.env` file next to `compose.yaml`:
+
+```
+ANTHROPIC_API_KEY=sk-…
+TOMTOM_API_KEY=…
+```
+
+Or bind-mount your own `settings.toml` by uncommenting the relevant line in `compose.yaml`. Per-persona config is always read from `./personas/` on the host (live-editable, no rebuild needed — restart `airtime` to pick up changes).
