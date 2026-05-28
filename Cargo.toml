@@ -2,7 +2,7 @@
 name    = "airtime"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.86"
 description = "Personal AI radio station platform — multi-station Icecast2 streaming with LLM-scripted DJ segments."
 license = "MIT"
 

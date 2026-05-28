@@ -5,10 +5,12 @@
 # rebuilds, so iterative builds only recompile what changed. Falls back
 # to a normal (uncached) build on legacy Docker clients.
 #
-# Rust 1.85+ is required: a transitive dep (`hashbrown 0.17`) needs
-# `edition2024`, stabilized in 1.85. Bumping forward should be safe;
-# bumping back below 1.85 will fail the cargo build inside this stage.
-FROM rust:1.85-bookworm AS builder
+# Pin to the same minor that CI's `dtolnay/rust-toolchain@stable` is
+# currently shipping — keeps the builder in lockstep with the
+# `cargo test`/`cargo clippy` job so transitive-dep MSRV bumps surface
+# in both places at once. Floor today is 1.86 (icu_* family), but pinning
+# higher avoids re-bumping every time a dep slides forward.
+FROM rust:1.96-bookworm AS builder
 
 WORKDIR /build
 
