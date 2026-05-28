@@ -14,7 +14,8 @@ pub fn profile_filter(name: &str) -> Option<&'static str> {
         ),
         "broadcast_crunch" => Some(
             // AM-radio-ish: narrow-band telephone-y, lots of mids, heavy comp.
-            "highpass=f=200,lowpass=f=6000,acompressor=ratio=6:attack=5:release=80:threshold=-20",
+            // threshold=0.1 is approximately -20dB in linear scale
+            "highpass=f=200,lowpass=f=6000,acompressor=ratio=6:attack=5:release=80:threshold=0.1",
         ),
         "telephone" => Some(
             // 8 kHz μ-law-ish band, narrow voice cut.
