@@ -10,7 +10,7 @@
 # `cargo test`/`cargo clippy` job so transitive-dep MSRV bumps surface
 # in both places at once. Floor today is 1.86 (icu_* family), but pinning
 # higher avoids re-bumping every time a dep slides forward.
-FROM rust:1.96-bookworm AS builder
+FROM rust:1.95-bookworm AS builder
 
 WORKDIR /build
 
