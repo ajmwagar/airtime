@@ -98,7 +98,7 @@ impl AudioProcessor {
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "segment".into());
-        let out = self.temp_dir.join(format!("{stem}.processed.flac"));
+        let out = self.temp_dir.join(format!("{stem}.processed.ogg"));
 
         let mut filter = format!(
             "loudnorm=I={i}:TP={tp}:LRA=11",
@@ -120,6 +120,8 @@ impl AudioProcessor {
             &filter,
             "-c:a",
             "flac",
+            "-f",
+            "ogg",
             out.to_string_lossy().as_ref(),
         ])
         .await?;
