@@ -16,7 +16,7 @@ mod track_outro;
 mod traffic;
 mod weather;
 
-pub use base::{Skill, SkillContext, SkillError, SkillOutput, SkillRuntime};
+pub use base::{RecentSegment, Skill, SkillContext, SkillError, SkillOutput, SkillRuntime};
 pub use caller::CallerSkill;
 pub use fake_ad::FakeAdSkill;
 pub use station_id::StationIdSkill;

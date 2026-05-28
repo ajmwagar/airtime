@@ -31,8 +31,7 @@ impl Skill for StationIdSkill {
         let cfg = ctx.persona.skill_config(self.name());
         let system = system_prompt(&ctx.persona);
         let user = format!(
-            "Drop a short station ID for {callsign}. Mention the format ({genres}). \
-             Max {max} words. Spoken naturally.",
+            "Drop a station ID for {callsign} ({genres}). Max {max} words.",
             callsign = ctx.persona.host.callsign,
             genres = ctx.persona.host.genre.join(", "),
             max = cfg.max_words,

@@ -111,6 +111,7 @@ async fn track_intro_calls_llm_with_track_metadata() {
             bit_depth: Some(24),
         }),
         feeds: FeedSnapshot::default(),
+        recent: vec![],
     };
 
     // The skill will hit our wiremock'd Ollama, then call the stub TTS,

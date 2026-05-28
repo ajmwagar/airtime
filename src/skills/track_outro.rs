@@ -1,7 +1,8 @@
 //! `track_outro` — DJ wraps up the track that just played.
 
 use super::base::{
-    render_segment, system_prompt, Skill, SkillContext, SkillError, SkillOutput, SkillRuntime,
+    recent_context_block, render_segment, system_prompt, Skill, SkillContext, SkillError,
+    SkillOutput, SkillRuntime,
 };
 use async_trait::async_trait;
 
@@ -30,11 +31,11 @@ impl Skill for TrackOutroSkill {
         let cfg = ctx.persona.skill_config(self.name());
         let system = system_prompt(&ctx.persona);
         let user = format!(
-            "That was \"{title}\" by {artist}. Write a short outro reflecting on the track. \
-             Max {max} words. Spoken naturally.",
+            "Outro that track (\"{title}\" — {artist}) in max {max} words. Brief reflection or callback.{recent}",
+            max = cfg.max_words,
             title = track.title,
             artist = track.artist,
-            max = cfg.max_words,
+            recent = recent_context_block(&ctx.recent),
         );
         let backend = ctx.persona.resolve_llm_backend(self.name());
         let script = rt.llm.complete(&system, &user, &backend).await?;

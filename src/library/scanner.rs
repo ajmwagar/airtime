@@ -111,11 +111,91 @@ impl MusicLibrary {
         self.inner.read().await.clone()
     }
 
+    /// Genre-aware pick. Honours `mode`:
+    ///   - `"strict"`  → only tracks tagged with one of `genres`;
+    ///   - `"blended"` → ~80 % genre-matched, ~20 % wildcards;
+    ///   - `"free"`    → ignore `genres`, just avoid the history.
+    ///
+    /// Falls back gracefully when the strict pool would be empty
+    /// (no tagged tracks, or every match is in the history): degrades
+    /// to a wildcard pick instead of refusing to return anything.
+    pub async fn pick(
+        &self,
+        history: &super::history::TrackHistory,
+        genres: &[String],
+        mode: &str,
+    ) -> Option<Track> {
+        use rand::Rng;
+
+        let guard = self.inner.read().await;
+        if guard.is_empty() {
+            return None;
+        }
+
+        let fresh: Vec<&Track> = guard
+            .iter()
+            .filter(|t| !history.contains(&t.path))
+            .collect();
+        let wildcard_pool: Vec<&Track> = if fresh.is_empty() {
+            guard.iter().collect()
+        } else {
+            fresh
+        };
+
+        let want_filter = matches!(mode, "strict" | "blended") && !genres.is_empty();
+        if !want_filter {
+            return wildcard_pool
+                .choose(&mut rand::thread_rng())
+                .map(|t| (*t).clone());
+        }
+
+        // 20 % of the time in blended mode, ignore the filter so the
+        // station stays surprising.
+        if mode == "blended" && rand::thread_rng().gen_bool(0.20) {
+            return wildcard_pool
+                .choose(&mut rand::thread_rng())
+                .map(|t| (*t).clone());
+        }
+
+        let matched: Vec<&Track> = wildcard_pool
+            .iter()
+            .copied()
+            .filter(|t| track_matches_genres(t, genres))
+            .collect();
+
+        // Fall through if nothing matches. Better to play something off-genre
+        // than to play silence.
+        if matched.is_empty() {
+            return wildcard_pool
+                .choose(&mut rand::thread_rng())
+                .map(|t| (*t).clone());
+        }
+        matched
+            .choose(&mut rand::thread_rng())
+            .map(|t| (*t).clone())
+    }
+
     /// Test-only: bypass the filesystem walk and seed the index directly.
     #[cfg(test)]
     pub async fn seed_for_test(&self, tracks: Vec<Track>) {
         *self.inner.write().await = tracks;
     }
+}
+
+/// Does `track`'s tag match any of `genres`? Case-insensitive, with
+/// substring matching in both directions: persona genre `"jazz"` hits
+/// track tag `"Soul Jazz"`, and persona genre `"new wave"` hits track
+/// tag `"new-wave"`. Conservative enough that mistuned tags don't
+/// leak across genres in `strict` mode.
+fn track_matches_genres(track: &Track, genres: &[String]) -> bool {
+    let Some(tag) = track.genre.as_deref() else {
+        return false;
+    };
+    let tag_lower = tag.to_lowercase();
+    genres.iter().any(|g| {
+        let g_lower = g.to_lowercase();
+        tag_lower.contains(&g_lower) || g_lower.contains(&tag_lower)
+    })
 }
 
 fn walk(root: &Path) -> Vec<Track> {
@@ -250,6 +330,102 @@ mod tests {
             format: "flac".into(),
             sample_rate: None,
             bit_depth: None,
+        }
+    }
+
+    fn fake_track_with_genre(path: &str, genre: &str) -> Track {
+        let mut t = fake_track(path);
+        t.genre = Some(genre.into());
+        t
+    }
+
+    #[test]
+    fn genre_matching_is_case_insensitive_and_bidirectional() {
+        let t = fake_track_with_genre("/a", "Soul Jazz");
+        assert!(track_matches_genres(&t, &["jazz".into()]));
+        assert!(track_matches_genres(&t, &["JAZZ".into()]));
+        assert!(track_matches_genres(&t, &["Soul".into()]));
+        // Persona genre wider than tag — still matches via the other dir.
+        let t = fake_track_with_genre("/a", "jazz");
+        assert!(track_matches_genres(&t, &["soul jazz".into()]));
+        // Total miss.
+        assert!(!track_matches_genres(&t, &["techno".into()]));
+        // Untagged tracks never match anything.
+        let t = fake_track("/a");
+        assert!(!track_matches_genres(&t, &["jazz".into()]));
+    }
+
+    #[tokio::test]
+    async fn pick_strict_returns_only_matching_genre() {
+        let lib = MusicLibrary::new();
+        lib.seed_for_test(vec![
+            fake_track_with_genre("/jazz.flac", "Jazz"),
+            fake_track_with_genre("/synth.flac", "Synth-pop"),
+            fake_track_with_genre("/bossa.flac", "Bossa Nova"),
+        ])
+        .await;
+        let hist = super::super::history::TrackHistory::new(8);
+        let genres = vec!["jazz".into(), "bossa".into()];
+        // Drain a handful — should never see the synth-pop track.
+        for _ in 0..40 {
+            let pick = lib.pick(&hist, &genres, "strict").await.unwrap();
+            assert!(
+                pick.path != Path::new("/synth.flac"),
+                "strict picked off-genre: {:?}",
+                pick.path
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn pick_strict_falls_back_when_no_matches() {
+        let lib = MusicLibrary::new();
+        lib.seed_for_test(vec![fake_track_with_genre("/only.flac", "Techno")])
+            .await;
+        let hist = super::super::history::TrackHistory::new(8);
+        let genres = vec!["jazz".into()];
+        // No jazz available — degrade to the wildcard pool rather than
+        // returning None (silence is worse than off-genre).
+        let pick = lib.pick(&hist, &genres, "strict").await.unwrap();
+        assert_eq!(pick.path, PathBuf::from("/only.flac"));
+    }
+
+    #[tokio::test]
+    async fn pick_free_ignores_genres() {
+        let lib = MusicLibrary::new();
+        lib.seed_for_test(vec![
+            fake_track_with_genre("/jazz.flac", "Jazz"),
+            fake_track_with_genre("/synth.flac", "Synth-pop"),
+        ])
+        .await;
+        let hist = super::super::history::TrackHistory::new(8);
+        let genres = vec!["jazz".into()];
+        // free mode: both eligible. Verify across many picks both appear.
+        let mut seen_synth = false;
+        for _ in 0..200 {
+            let pick = lib.pick(&hist, &genres, "free").await.unwrap();
+            if pick.path == Path::new("/synth.flac") {
+                seen_synth = true;
+                break;
+            }
+        }
+        assert!(seen_synth, "free mode should not filter on genre");
+    }
+
+    #[tokio::test]
+    async fn pick_respects_history_within_genre() {
+        let lib = MusicLibrary::new();
+        lib.seed_for_test(vec![
+            fake_track_with_genre("/a.flac", "Jazz"),
+            fake_track_with_genre("/b.flac", "Jazz"),
+        ])
+        .await;
+        let mut hist = super::super::history::TrackHistory::new(8);
+        hist.record(PathBuf::from("/a.flac"));
+        let genres = vec!["jazz".into()];
+        for _ in 0..15 {
+            let pick = lib.pick(&hist, &genres, "strict").await.unwrap();
+            assert_eq!(pick.path, PathBuf::from("/b.flac"));
         }
     }
 
