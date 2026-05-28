@@ -40,6 +40,15 @@ inside_jokes = [
   "the 1987 mall incident",
   "his ex-roommate, Carl, who allegedly invented post-punk",
 ]
+# Mitch is wired. Short blasts, interruptions implied by em-dashes,
+# one exclamation that hits hard. Don't write him in long flowing
+# sentences — he doesn't think in those.
+delivery_notes = """
+Staccato. Most sentences under 8 words. Use em-dashes to imply
+self-interruption — "and listen — listen to this". One exclamation,
+land it on a noun. Question marks tilt up; use to needle the listener.
+Periods over commas where possible — punch the stop.
+"""
 
 # Day-parted programming. Mitch goes harder in morning drive (chatty,
 # caffeinated) and dials back overnight (longer music stretches, fewer
@@ -73,26 +82,28 @@ fake_ad      = true
 caller       = true
 
 [host.skill_config.top_of_hour]
-max_words    = 100
+max_words    = 70
 llm_backend  = "openrouter"
 news_sources = ["https://feeds.npr.org/1001/rss.xml"]
 
 [host.skill_config.fake_ad]
-max_words    = 120
-llm_backend  = "openrouter"
-
-[host.skill_config.caller]
 max_words    = 90
 llm_backend  = "openrouter"
 
+[host.skill_config.caller]
+max_words    = 70
+llm_backend  = "openrouter"
+
 [host.skill_config.track_intro]
-max_words    = 30
+max_words    = 22
 llm_backend  = "openrouter"
 
 [host.audio]
 eq_profile      = "broadcast_crunch"
 room_tone       = false
 loudness_target = -12.0
+# Mitch talks fast. 1.15x is noticeably punchy without being chipmunky.
+speech_speed    = 1.15
 
 [stream]
 mount  = "/mitch"

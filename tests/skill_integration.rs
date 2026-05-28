@@ -31,6 +31,7 @@ impl TtsEngine for StubTts {
         &self,
         text: &str,
         _voice: &str,
+        _speed: f32,
         out_dir: &Path,
     ) -> Result<PathBuf, KokoroError> {
         tokio::fs::create_dir_all(out_dir).await?;

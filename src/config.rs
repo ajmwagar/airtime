@@ -332,6 +332,14 @@ pub struct Personality {
     /// venues, characters the host alludes to.
     #[serde(default)]
     pub inside_jokes: Vec<String>,
+    /// Free-form line about cadence, sentence shape, and energy — fed
+    /// straight into the system prompt so the LLM writes scripts that
+    /// land right when Kokoro reads them. Things like "Clipped — two
+    /// short stabs, then a long sigh." Kokoro has limited prosody
+    /// range; what you write into the text is most of what listeners
+    /// hear.
+    #[serde(default)]
+    pub delivery_notes: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -424,6 +432,16 @@ pub struct HostAudio {
     #[serde(default)]
     pub room_tone: bool,
     pub loudness_target: f64,
+    /// Kokoro `--speed` multiplier. 1.0 is neutral; ~1.05-1.1 punches
+    /// up a warm voice without making it sound rushed; 1.15+ for
+    /// high-energy hosts. Below 0.9 starts sounding sedated. Persona-
+    /// driven so each host gets their own pace.
+    #[serde(default = "default_speech_speed")]
+    pub speech_speed: f32,
+}
+
+fn default_speech_speed() -> f32 {
+    1.0
 }
 
 #[derive(Debug, Clone, Deserialize)]

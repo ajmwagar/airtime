@@ -1,8 +1,8 @@
 //! `weather` — quick local conditions read.
 
 use super::base::{
-    render_segment, system_prompt, Skill, SkillContext, SkillError, SkillOutput, SkillRuntime,
-    SKILL_SCORE_BASELINE, SKILL_SCORE_PREFERRED,
+    recent_context_block, render_segment, system_prompt, Skill, SkillContext, SkillError,
+    SkillOutput, SkillRuntime, SKILL_SCORE_BASELINE, SKILL_SCORE_PREFERRED,
 };
 use async_trait::async_trait;
 
@@ -57,15 +57,18 @@ impl Skill for WeatherSkill {
                     )
                 };
                 format!(
-                    "Weather read in your voice. Right now: {temp_str} degrees {temp_unit}, \
-                     {cond}, wind {wind_str} {wind_unit}. Max {max} words.",
+                    "Quick weather read. Right now: {temp_str} degrees {temp_unit}, \
+                     {cond}, wind {wind_str} {wind_unit}. One sentence, two max. \
+                     Max {max} words.{recent}",
                     cond = w.conditions,
                     max = cfg.max_words,
+                    recent = recent_context_block(&ctx.recent),
                 )
             }
             None => format!(
-                "No weather data — improvise honestly, no fake numbers. Max {} words.",
-                cfg.max_words
+                "Weather data's out — say so briefly, no made-up numbers. Max {} words.{}",
+                cfg.max_words,
+                recent_context_block(&ctx.recent),
             ),
         };
         let backend = ctx.persona.resolve_llm_backend(self.name());

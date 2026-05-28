@@ -48,6 +48,14 @@ inside_jokes = [
   "that long night at the Five Spot in '63",
   "her cousin who runs a bait shop in Astoria",
 ]
+# Cadence direction — fed into every prompt so Kokoro reads with shape.
+# Donna's a late-night jazz host: short stabs, room to breathe.
+delivery_notes = """
+Sparse. Mix sentence lengths. Lead with a short stab (3-5 words), follow
+with one breathy mid-length thought riding a comma or two, close tight.
+Em-dashes for the wistful catches. Periods over semicolons. Never more
+than one exclamation per script.
+"""
 
 # Day-parted programming. First matching window wins (so keep them
 # non-overlapping). `hours = "22-04"` wraps midnight; "06-09" is
@@ -83,30 +91,33 @@ fake_ad      = false
 caller       = false
 
 [host.skill_config.top_of_hour]
-max_words    = 80
+max_words    = 60
 llm_backend  = "openrouter"
 news_sources = ["https://feeds.npr.org/1001/rss.xml"]
 
 [host.skill_config.weather]
-max_words    = 40
+max_words    = 25
 llm_backend  = "openrouter"
 
 [host.skill_config.track_intro]
-max_words    = 40
+max_words    = 25
 llm_backend  = "openrouter"
 
 [host.skill_config.track_outro]
-max_words    = 30
+max_words    = 20
 llm_backend  = "openrouter"
 
 [host.skill_config.station_id]
-max_words    = 20
+max_words    = 15
 llm_backend  = "openrouter"
 
 [host.audio]
 eq_profile      = "warm_analog"
 room_tone       = true
 loudness_target = -14.0
+# Kokoro --speed multiplier. Donna sits just slightly forward of neutral —
+# warm but not sedated. 1.0 felt a touch slow.
+speech_speed    = 1.05
 
 [stream]
 mount  = "/donna"

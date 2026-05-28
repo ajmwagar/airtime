@@ -322,35 +322,19 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, AudioError::FfmpegFailed { .. }));
 
-        std::env::remove_var("FFMPEG_BIN");
-    }
-
-    /// When a loudness target is set, the loudnorm filter must land in
-    /// the ffmpeg args before the codec stage. Locks in the contract
-    /// that pump_to_icecast applies wire-level normalization — the
-    /// reason music and TTS sit at the same perceived level.
-    #[tokio::test]
-    async fn loudness_target_adds_loudnorm_filter() {
-        let tmp = TempDir::new().unwrap();
-        let p = tmp.path().join("dummy.flac");
-        std::fs::write(&p, b"not-really-flac").unwrap();
-        let (tx, _rx) = mpsc::channel::<Vec<u8>>(1);
-        let fmt = StreamFormat::Mp3 { bitrate_kbps: 128 };
-
-        // Capture the ffmpeg invocation by pointing FFMPEG_BIN at a
-        // script that echoes argv to stderr, then fails. Stderr comes
-        // back as part of FfmpegFailed::stderr.
+        // Loudnorm wiring: when a target is set, the filter has to land
+        // in the ffmpeg args before the codec stage. Capture via an echo
+        // script so we can inspect the actual argv. Kept in this test
+        // (rather than its own) so the FFMPEG_BIN mutations don't race
+        // across parallel tests.
         let echo = tmp.path().join("echo-args.sh");
         std::fs::write(&echo, "#!/bin/sh\necho \"$@\" >&2\nexit 1\n").unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&echo, std::fs::Permissions::from_mode(0o755)).unwrap();
-
         std::env::set_var("FFMPEG_BIN", echo.to_str().unwrap());
         let err = pump_to_icecast(&p, &tx, 1024, &fmt, Some(-14.0))
             .await
             .unwrap_err();
-        std::env::remove_var("FFMPEG_BIN");
-
         match err {
             AudioError::FfmpegFailed { stderr, .. } => {
                 assert!(
@@ -360,5 +344,7 @@ mod tests {
             }
             other => panic!("expected FfmpegFailed, got {other:?}"),
         }
+
+        std::env::remove_var("FFMPEG_BIN");
     }
 }

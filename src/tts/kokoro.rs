@@ -18,11 +18,13 @@ pub enum KokoroError {
 
 #[async_trait]
 pub trait TtsEngine: Send + Sync {
-    /// Render `text` to a WAV file using `voice_model`. Returns the path.
+    /// Render `text` to a WAV file using `voice_model` at `speed` (1.0
+    /// = neutral). Returns the path.
     async fn render(
         &self,
         text: &str,
         voice_model: &str,
+        speed: f32,
         out_dir: &Path,
     ) -> Result<PathBuf, KokoroError>;
 }
@@ -53,6 +55,7 @@ impl TtsEngine for KokoroTts {
         &self,
         text: &str,
         voice_model: &str,
+        speed: f32,
         out_dir: &Path,
     ) -> Result<PathBuf, KokoroError> {
         tokio::fs::create_dir_all(out_dir).await?;
@@ -65,6 +68,7 @@ impl TtsEngine for KokoroTts {
                 .unwrap_or_default()
         );
         let out = out_dir.join(format!("{stem}.wav"));
+        let speed_str = format!("{speed:.2}");
 
         let mut child = Command::new(&self.binary)
             .args([
@@ -74,6 +78,8 @@ impl TtsEngine for KokoroTts {
                 self.voices_path.to_string_lossy().as_ref(),
                 "--voice",
                 voice_model,
+                "--speed",
+                speed_str.as_str(),
                 "--out",
                 out.to_string_lossy().as_ref(),
             ])
@@ -127,7 +133,7 @@ mod tests {
             tmp.path().join("voices.bin"),
         );
         let err = tts
-            .render("hello", "af_heart", tmp.path())
+            .render("hello", "af_heart", 1.0, tmp.path())
             .await
             .unwrap_err();
         assert!(matches!(err, KokoroError::BinaryMissing(_)));
@@ -146,7 +152,7 @@ mod tests {
             tmp.path().join("model.onnx"),
             tmp.path().join("voices.bin"),
         );
-        let out = tts.render("hi", "af_heart", tmp.path()).await.unwrap();
+        let out = tts.render("hi", "af_heart", 1.0, tmp.path()).await.unwrap();
         assert!(out.to_string_lossy().ends_with(".wav"));
     }
 }
