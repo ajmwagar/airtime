@@ -306,13 +306,18 @@ pub struct KeepaliveConfig {
 }
 
 /// Consumer-side configuration. Holds the chunk size we hand to ffmpeg,
-/// the wire-format we're encoding to, and the optional silence-keepalive
-/// policy.
+/// the wire-format we're encoding to, the optional silence-keepalive
+/// policy, and the optional final-pass loudness target. With
+/// `loudness_target = Some(-14.0)` (or whatever the persona uses), every
+/// segment — music, TTS, silence — gets a single-pass loudnorm at the
+/// ffmpeg encode step so listeners hear one consistent level rather
+/// than music several dB hotter than the host.
 #[derive(Debug, Clone)]
 pub struct ConsumerConfig {
     pub chunk_size: usize,
     pub format: StreamFormat,
     pub keepalive: Option<KeepaliveConfig>,
+    pub loudness_target: Option<f64>,
 }
 
 /// Consumer side: drain `PlayItem`s, hand each to `pump_to_icecast`.
@@ -342,9 +347,14 @@ pub async fn run_consumer(
         match next {
             Ok(Some(item)) => {
                 debug!(label = %item.label, duration_ms = item.duration_ms, "pumping");
-                if let Err(e) =
-                    pump_to_icecast(&item.path, &icecast_tx, config.chunk_size, &config.format)
-                        .await
+                if let Err(e) = pump_to_icecast(
+                    &item.path,
+                    &icecast_tx,
+                    config.chunk_size,
+                    &config.format,
+                    config.loudness_target,
+                )
+                .await
                 {
                     warn!(label = %item.label, error = %e, "pump failed — skipping segment");
                 }
@@ -368,6 +378,7 @@ pub async fn run_consumer(
                         &icecast_tx,
                         config.chunk_size,
                         &config.format,
+                        config.loudness_target,
                     )
                     .await
                     {

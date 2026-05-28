@@ -284,6 +284,11 @@ async fn run_station(
     };
     let consumer_audio_tx = audio_tx.clone();
     let consumer_format = format.clone();
+    // Persona-driven loudness target: music files stream through this
+    // single-pass loudnorm so they sit at the same perceived level as
+    // the (already pre-normalised) TTS host. Without it, master loudness
+    // varies several dB across tracks and the host disappears between songs.
+    let loudness_target = Some(persona.host.audio.loudness_target);
     let consumer_task = tokio::spawn(async move {
         run_consumer(
             item_rx,
@@ -292,6 +297,7 @@ async fn run_station(
                 chunk_size: 16 * 1024,
                 format: consumer_format,
                 keepalive,
+                loudness_target,
             },
         )
         .await;
