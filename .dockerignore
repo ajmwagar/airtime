@@ -1,0 +1,16 @@
+target/
+.git/
+**/*.rs.bk
+*.pdb
+**/mutants.out*/
+
+# Models are big and host-managed — mount them at runtime instead.
+models/
+
+# Music library is host-managed.
+music/
+
+# Local notes / artifacts.
+.idea/
+.vscode/
+*.log

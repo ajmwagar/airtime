@@ -1,0 +1,43 @@
+//! `station_id` — short imager. "You're listening to KFLT…"
+
+use super::base::{
+    render_segment, system_prompt, Skill, SkillContext, SkillError, SkillOutput, SkillRuntime,
+    SKILL_SCORE_BASELINE, SKILL_SCORE_PREFERRED,
+};
+use async_trait::async_trait;
+
+pub struct StationIdSkill;
+
+#[async_trait]
+impl Skill for StationIdSkill {
+    fn name(&self) -> &'static str {
+        "station_id"
+    }
+
+    /// Drop near the quarter-hour marks (:15, :30, :45) — classic radio
+    /// imager cadence. Still eligible at baseline elsewhere.
+    fn time_score(&self, minute: u32) -> i32 {
+        match minute {
+            14..=16 | 29..=31 | 44..=46 => SKILL_SCORE_PREFERRED,
+            _ => SKILL_SCORE_BASELINE,
+        }
+    }
+
+    async fn generate(
+        &self,
+        ctx: &SkillContext,
+        rt: &SkillRuntime,
+    ) -> Result<SkillOutput, SkillError> {
+        let cfg = ctx.persona.skill_config(self.name());
+        let system = system_prompt(&ctx.persona);
+        let user = format!(
+            "Drop a short station ID for {callsign}. Mention the format ({genres}). \
+             Max {max} words. Spoken naturally.",
+            callsign = ctx.persona.host.callsign,
+            genres = ctx.persona.host.genre.join(", "),
+            max = cfg.max_words,
+        );
+        let script = rt.llm.complete(&system, &user, &cfg.llm_backend).await?;
+        render_segment(rt, &ctx.persona, script, "station_id").await
+    }
+}

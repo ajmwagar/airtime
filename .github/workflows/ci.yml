@@ -1,0 +1,115 @@
+name: ci
+
+on:
+  push:
+    branches: [master, main, "claude/**"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Cancel superseded runs on the same branch.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: cargo test + clippy + fmt
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets --no-deps -- -D warnings
+
+      - name: cargo test
+        run: cargo test --all-targets --locked
+
+      - name: cargo doc
+        run: cargo doc --no-deps --document-private-items
+
+  docker:
+    name: docker build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Independent of `rust` so we still get docker-build signal even when
+    # the Rust job is mid-fix. Lint failures shouldn't hide image breakage.
+    permissions:
+      # `cache-to: type=gha` writes back to the Actions cache service.
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Use a registry-style cache so iterative CI runs are fast — the
+      # second push that only touches src/ should reuse the dep layer.
+      - name: Build airtime image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: false
+          load: true
+          tags: airtime:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify image contents
+        run: |
+          # Confirm the binary, kokoro shim, and ffmpeg are all in place
+          # and runnable. The airtime binary itself doesn't take flags,
+          # so we don't try to run it here — that requires Icecast +
+          # Ollama, which are wired up by compose.
+          docker run --rm airtime:ci test -x /usr/local/bin/airtime
+          docker run --rm airtime:ci test -x /usr/local/bin/kokoro
+          docker run --rm airtime:ci ffmpeg -version | head -1
+          # kokoro_onnx doesn't expose `__version__` — just confirm the
+          # module imports (which exercises onnxruntime + numpy + soundfile too).
+          docker run --rm airtime:ci python3 -c "import kokoro_onnx; print('kokoro-onnx import OK')"
+          # The image ships personas + settings — make sure they survived the build.
+          docker run --rm airtime:ci test -f /app/settings.toml
+          docker run --rm airtime:ci test -f /app/personas/donna.toml
+          docker run --rm airtime:ci test -f /app/personas/mitch.toml
+
+      - name: Boot test (process starts, reads settings, exits on missing infra)
+        run: |
+          # Run with a 5s timeout — airtime should boot, log "settings
+          # loaded", attempt to connect to Icecast (which doesn't exist
+          # in this job), and then loop attempting reconnects. Any panic
+          # or settings-parse failure would surface before the timeout.
+          timeout 5s docker run --rm airtime:ci /usr/local/bin/airtime 2>&1 | tee boot.log || true
+          grep -q "settings loaded" boot.log
+
+  compose:
+    name: docker compose config
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate compose.yaml
+        run: docker compose -f compose.yaml config --quiet

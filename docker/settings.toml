@@ -1,0 +1,47 @@
+# Docker-network settings for airtime.
+#
+# Service names (icecast, ollama) resolve via Compose DNS — see compose.yaml.
+# Override anything here by bind-mounting your own settings.toml onto
+# /app/settings.toml (see compose.yaml's `volumes:` block).
+
+[icecast]
+host     = "icecast"
+port     = 8000
+password = "hackme"
+user     = "source"
+
+[ollama]
+base_url = "http://ollama:11434"
+model    = "llama3.1:8b"
+
+[claude]
+model    = "claude-sonnet-4-20250514"
+# API key via ANTHROPIC_API_KEY env var (forwarded by compose).
+
+[kokoro]
+# Model files are mounted at /app/models — drop kokoro-v1.0.onnx and
+# voices.bin into ./models on the host and they'll appear here.
+model_path  = "/app/models/kokoro-v1.0.onnx"
+voices_path = "/app/models/voices.bin"
+sample_rate = 24000
+binary      = "/usr/local/bin/kokoro"
+
+[library]
+# Mount your FLAC/WAV collection at ./music on the host → /music here.
+path          = "/music"
+formats       = ["flac", "wav", "aiff"]
+scan_on_start = true
+
+[feeds]
+# Seattle by default; override for your locale.
+weather_lat = 47.6062
+weather_lon = -122.3321
+
+[feeds.traffic]
+provider = "tomtom"
+# API key via TOMTOM_API_KEY env var (forwarded by compose).
+
+[audio]
+temp_dir        = "/tmp/airtime"
+loudness_target = -14.0
+true_peak       = -1.0
