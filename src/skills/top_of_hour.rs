@@ -49,7 +49,8 @@ impl Skill for TopOfHourSkill {
             callsign = ctx.persona.host.callsign,
             max = cfg.max_words,
         );
-        let script = rt.llm.complete(&system, &user, &cfg.llm_backend).await?;
+        let backend = ctx.persona.resolve_llm_backend(self.name());
+        let script = rt.llm.complete(&system, &user, &backend).await?;
         render_segment(rt, &ctx.persona, script, "top_of_hour").await
     }
 }

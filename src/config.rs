@@ -156,6 +156,13 @@ pub struct Host {
     #[serde(default)]
     pub skill_config: HashMap<String, SkillConfig>,
     pub audio: HostAudio,
+    /// Persona-wide default LLM backend. Skills inherit this when their
+    /// own `[host.skill_config.X].llm_backend` is unset. If this is also
+    /// unset, the ultimate fallback is `"ollama"`. Set once at the
+    /// `[host]` level to avoid having to declare `llm_backend` on every
+    /// enabled skill.
+    #[serde(default)]
+    pub default_llm_backend: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -213,8 +220,11 @@ impl SkillToggles {
 pub struct SkillConfig {
     #[serde(default = "default_max_words")]
     pub max_words: usize,
-    #[serde(default = "default_backend")]
-    pub llm_backend: String,
+    /// Per-skill backend override. `None` means "use the persona's
+    /// `default_llm_backend`, falling back to ollama if that's also
+    /// unset" — see `Persona::resolve_llm_backend`.
+    #[serde(default)]
+    pub llm_backend: Option<String>,
     #[serde(default)]
     pub news_sources: Vec<String>,
 }
@@ -223,7 +233,7 @@ impl Default for SkillConfig {
     fn default() -> Self {
         Self {
             max_words: default_max_words(),
-            llm_backend: default_backend(),
+            llm_backend: None,
             news_sources: Vec::new(),
         }
     }
@@ -233,9 +243,10 @@ fn default_max_words() -> usize {
     40
 }
 
-fn default_backend() -> String {
-    "ollama".into()
-}
+/// Ultimate fallback backend when neither the per-skill nor the
+/// persona-wide default is set. Free + local, so airtime keeps working
+/// without API keys.
+pub const FALLBACK_LLM_BACKEND: &str = "ollama";
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct HostAudio {
@@ -273,6 +284,22 @@ impl Persona {
             .get(skill)
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// Resolve which LLM backend `skill` should use.
+    ///
+    /// Fallback chain (first match wins):
+    /// 1. `[host.skill_config.{skill}].llm_backend` — per-skill override.
+    /// 2. `[host].default_llm_backend` — persona-wide default.
+    /// 3. `FALLBACK_LLM_BACKEND` (`"ollama"`) — ultimate fallback so
+    ///    airtime keeps working with no config + no API keys.
+    pub fn resolve_llm_backend(&self, skill: &str) -> String {
+        self.host
+            .skill_config
+            .get(skill)
+            .and_then(|cfg| cfg.llm_backend.clone())
+            .or_else(|| self.host.default_llm_backend.clone())
+            .unwrap_or_else(|| FALLBACK_LLM_BACKEND.into())
     }
 }
 
@@ -338,7 +365,7 @@ format = "flac"
         let persona: Persona = toml::from_str(DONNA).expect("parse");
         let cfg = persona.skill_config("top_of_hour");
         assert_eq!(cfg.max_words, 80);
-        assert_eq!(cfg.llm_backend, "claude");
+        assert_eq!(cfg.llm_backend.as_deref(), Some("claude"));
         assert_eq!(cfg.news_sources.len(), 1);
     }
 
@@ -347,7 +374,108 @@ format = "flac"
         let persona: Persona = toml::from_str(DONNA).expect("parse");
         let cfg = persona.skill_config("track_intro");
         assert_eq!(cfg.max_words, 40);
-        assert_eq!(cfg.llm_backend, "ollama");
+        // Per-skill `llm_backend` is None — caller resolves via
+        // `resolve_llm_backend` to walk the persona → fallback chain.
+        assert!(cfg.llm_backend.is_none());
+    }
+
+    /// Tiny persona with no `default_llm_backend` and no per-skill
+    /// overrides — verifies the ultimate `"ollama"` fallback fires.
+    const BARE: &str = r#"
+[host]
+name         = "X"
+callsign     = "X"
+era          = "X"
+genre        = []
+voice_model  = "X"
+tone_prompt  = "X"
+
+[host.skills]
+
+[host.audio]
+loudness_target = -14.0
+
+[stream]
+mount  = "/x"
+format = "flac"
+"#;
+
+    #[test]
+    fn resolve_llm_backend_per_skill_wins() {
+        let persona: Persona = toml::from_str(DONNA).expect("parse");
+        // DONNA sets top_of_hour to claude explicitly.
+        assert_eq!(persona.resolve_llm_backend("top_of_hour"), "claude");
+    }
+
+    #[test]
+    fn resolve_llm_backend_falls_through_to_host_default() {
+        let persona: Persona = toml::from_str(
+            r#"
+[host]
+name         = "X"
+callsign     = "X"
+era          = "X"
+genre        = []
+voice_model  = "X"
+tone_prompt  = "X"
+default_llm_backend = "openrouter"
+
+[host.skills]
+
+[host.audio]
+loudness_target = -14.0
+
+[stream]
+mount  = "/x"
+format = "flac"
+"#,
+        )
+        .expect("parse");
+        assert_eq!(persona.resolve_llm_backend("station_id"), "openrouter");
+        assert_eq!(persona.resolve_llm_backend("weather"), "openrouter");
+    }
+
+    #[test]
+    fn resolve_llm_backend_per_skill_still_overrides_host_default() {
+        let persona: Persona = toml::from_str(
+            r#"
+[host]
+name         = "X"
+callsign     = "X"
+era          = "X"
+genre        = []
+voice_model  = "X"
+tone_prompt  = "X"
+default_llm_backend = "openrouter"
+
+[host.skills]
+
+[host.skill_config.weather]
+llm_backend = "claude"
+
+[host.audio]
+loudness_target = -14.0
+
+[stream]
+mount  = "/x"
+format = "flac"
+"#,
+        )
+        .expect("parse");
+        // weather has its own override:
+        assert_eq!(persona.resolve_llm_backend("weather"), "claude");
+        // station_id inherits the host default:
+        assert_eq!(persona.resolve_llm_backend("station_id"), "openrouter");
+    }
+
+    #[test]
+    fn resolve_llm_backend_ultimate_fallback_is_ollama() {
+        let persona: Persona = toml::from_str(BARE).expect("parse");
+        assert_eq!(
+            persona.resolve_llm_backend("anything"),
+            FALLBACK_LLM_BACKEND
+        );
+        assert_eq!(persona.resolve_llm_backend("anything"), "ollama");
     }
 
     const SETTINGS: &str = r#"

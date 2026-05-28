@@ -141,6 +141,7 @@ mod tests {
                 tone_prompt: "Warm, sardonic.".into(),
                 skills: SkillToggles::default(),
                 skill_config: Default::default(),
+                default_llm_backend: None,
                 audio: HostAudio {
                     eq_profile: None,
                     room_tone: false,

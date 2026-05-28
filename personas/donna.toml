@@ -9,6 +9,9 @@ Warm, slightly sardonic late-night jazz host.
 1960s AM radio energy. Knows every session musician
 by name. Occasionally wistful. Never hurried.
 """
+# Persona-wide default backend — any enabled skill without its own
+# `[host.skill_config.X].llm_backend` inherits this. Unset → "ollama".
+default_llm_backend = "openrouter"
 
 [host.skills]
 track_intro  = true
