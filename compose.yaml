@@ -7,8 +7,8 @@
 #   # drop FLAC/WAV files into ./music
 #   docker compose up airtime
 #
-# Listen at: http://localhost:8000/donna   (and any other persona mount)
-# Status:     http://localhost:8000/status.xsl
+# Listen at: http://localhost:8001/donna   (and any other persona mount)
+# Status:     http://localhost:8001/status.xsl
 
 services:
   icecast:
@@ -16,15 +16,10 @@ services:
     container_name: airtime-icecast
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "8001:8000"
     volumes:
       - ./docker/icecast.xml:/etc/icecast.xml:ro
-    healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://localhost:8000/status.xsl || exit 1"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
-      start_period: 5s
+    # healthcheck disabled - checking manually
 
   ollama:
     image: ollama/ollama:latest
@@ -49,9 +44,9 @@ services:
     restart: unless-stopped
     depends_on:
       icecast:
-        condition: service_healthy
+        condition: service_started
       ollama:
-        condition: service_healthy
+        condition: service_started
     environment:
       RUST_LOG: "info,airtime=debug"
       # Optional secrets — pass through from the host shell or `.env`.

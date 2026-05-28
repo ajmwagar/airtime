@@ -23,20 +23,20 @@ caller       = true
 
 [host.skill_config.top_of_hour]
 max_words    = 100
-llm_backend  = "claude"
+llm_backend  = "openrouter"
 news_sources = ["https://feeds.npr.org/1001/rss.xml"]
 
 [host.skill_config.fake_ad]
 max_words    = 120
-llm_backend  = "claude"
+llm_backend  = "openrouter"
 
 [host.skill_config.caller]
 max_words    = 90
-llm_backend  = "claude"
+llm_backend  = "openrouter"
 
 [host.skill_config.track_intro]
 max_words    = 30
-llm_backend  = "ollama"
+llm_backend  = "openrouter"
 
 [host.audio]
 eq_profile      = "broadcast_crunch"

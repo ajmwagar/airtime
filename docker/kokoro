@@ -11,9 +11,39 @@ the rest of the airtime pipeline up-samples losslessly via ffmpeg.
 """
 import argparse
 import sys
-
+import numpy as np
 import soundfile as sf
+
+# Import and patch kokoro_onnx
+import kokoro_onnx
 from kokoro_onnx import Kokoro
+
+# Monkey-patch the _create_audio method to fix the input name bug
+# The library uses 'tokens' but ONNX model expects 'input_ids'
+_original_create_audio = kokoro_onnx.Kokoro._create_audio
+
+def _patched_create_audio(self, phonemes, voice, speed):
+    """Patched version that uses correct input names for ONNX."""
+    tokens = np.array(self.tokenizer.tokenize(phonemes), dtype=np.int64)
+    if len(tokens) > 510:
+        tokens = tokens[:510]
+    
+    # Get voice style
+    style = voice[len(tokens)]
+    
+    # Prepare inputs with CORRECT names (input_ids not tokens)
+    inputs = {
+        'input_ids': [[0, *tokens, 0]],
+        'style': style,
+        'speed': np.array([speed], dtype=np.float32),
+    }
+    
+    audio = self.sess.run(None, inputs)[0]
+    # Return sample_rate from self (it's set in __init__)
+    return audio, 24000  # Kokoro uses 24kHz
+
+# Apply the patch
+kokoro_onnx.Kokoro._create_audio = _patched_create_audio
 
 
 def main() -> int:

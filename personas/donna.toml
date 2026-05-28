@@ -22,24 +22,24 @@ caller       = false
 
 [host.skill_config.top_of_hour]
 max_words    = 80
-llm_backend  = "claude"
+llm_backend  = "openrouter"
 news_sources = ["https://feeds.npr.org/1001/rss.xml"]
 
 [host.skill_config.weather]
 max_words    = 40
-llm_backend  = "ollama"
+llm_backend  = "openrouter"
 
 [host.skill_config.track_intro]
 max_words    = 40
-llm_backend  = "ollama"
+llm_backend  = "openrouter"
 
 [host.skill_config.track_outro]
 max_words    = 30
-llm_backend  = "ollama"
+llm_backend  = "openrouter"
 
 [host.skill_config.station_id]
 max_words    = 20
-llm_backend  = "ollama"
+llm_backend  = "openrouter"
 
 [host.audio]
 eq_profile      = "warm_analog"
