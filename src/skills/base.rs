@@ -5,16 +5,39 @@ use crate::config::Persona;
 use crate::feeds::FeedSnapshot;
 use crate::library::Track;
 use crate::llm::{LlmError, LlmRouter};
+use crate::text::tts_safe;
 use crate::tts::{KokoroError, TtsEngine};
 use async_trait::async_trait;
 use std::path::PathBuf;
 use std::sync::Arc;
+
+/// One past entry the host can refer back to. The producer keeps a
+/// rolling window of these and hands them to every skill so the host
+/// sounds like they're running a show, not reading detached cards.
+#[derive(Debug, Clone)]
+pub enum RecentSegment {
+    /// A track that played.
+    Track {
+        artist: String,
+        title: String,
+        genre: Option<String>,
+    },
+    /// A spoken segment that aired. `script_preview` is the first ~120
+    /// chars of what the host said — enough for the LLM to avoid
+    /// repeating itself.
+    Spoken {
+        kind: &'static str,
+        script_preview: String,
+    },
+}
 
 #[derive(Debug, Clone)]
 pub struct SkillContext {
     pub persona: Persona,
     pub track: Option<Track>,
     pub feeds: FeedSnapshot,
+    /// Most-recent-last. Producer maintains; skills read only.
+    pub recent: Vec<RecentSegment>,
 }
 
 #[derive(Debug, Clone)]
@@ -85,15 +108,21 @@ pub trait Skill: Send + Sync {
 /// Common helper that turns the LLM script into a finished, processed
 /// FLAC segment. All skills route through this so the audio pipeline
 /// stays uniform.
+///
+/// Every script is run through [`tts_safe`] before it reaches Kokoro,
+/// stripping any Markdown, stage directions, or bullet markers the LLM
+/// reflexively emits. Without this Kokoro pronounces every `*` and
+/// `[chuckles]` literally and the station sounds broken.
 pub(crate) async fn render_segment(
     rt: &SkillRuntime,
     persona: &Persona,
     script: String,
     segment_type: &'static str,
 ) -> Result<SkillOutput, SkillError> {
+    let clean = tts_safe(&script);
     let wav = rt
         .tts
-        .render(&script, &persona.host.voice_model, &rt.audio.temp_dir)
+        .render(&clean, &persona.host.voice_model, &rt.audio.temp_dir)
         .await?;
     let processed = rt
         .audio
@@ -106,29 +135,104 @@ pub(crate) async fn render_segment(
         audio_path: processed,
         duration_ms,
         segment_type,
-        text: script,
+        text: clean,
     })
 }
 
+/// Build the system prompt for a skill call. Tight by design — every
+/// token paid for at the API, every token rewritten in the model's
+/// attention. Identity → voice signatures → output rules, no filler.
+///
+/// **TTS-safety section** stays last so it's the model's most recent
+/// instruction, with explicit Kokoro guidance: spell out numbers and
+/// abbreviations, punctuate for breath. Without this, hosts say
+/// "K-F-L-T nineteen-fifty-nine" as "kuf-lit one thousand nine hundred
+/// fifty nine" and the spell is broken.
 pub(crate) fn system_prompt(persona: &Persona) -> String {
-    format!(
-        "You are {name}, a radio DJ on {callsign}.\n\
-         Tone: {tone}\n\
-         Era/genre: {era} {genres} radio.\n\
-         Output spoken radio copy only. No stage directions. No quotes. \
-         Natural speech.",
+    let mut out = format!(
+        "You are {name} on {callsign}, the {era} {genres} station. {tone}",
         name = persona.host.name,
         callsign = persona.host.callsign,
-        tone = persona.host.tone_prompt.trim(),
         era = persona.host.era,
         genres = persona.host.genre.join(", "),
-    )
+        tone = persona.host.tone_prompt.trim(),
+    );
+
+    // Personality block — single section, only emitted when there's
+    // something to put in it.
+    let p = &persona.host.personality;
+    let mut quirks = Vec::with_capacity(5);
+    if let Some(o) = p.signature_opener.as_deref() {
+        quirks.push(format!("opener: {o}"));
+    }
+    if let Some(c) = p.signature_closer.as_deref() {
+        quirks.push(format!("closer: {c}"));
+    }
+    if !p.recurring_bits.is_empty() {
+        quirks.push(format!("running themes: {}", p.recurring_bits.join(" · ")));
+    }
+    if !p.catchphrases.is_empty() {
+        quirks.push(format!("catchphrases: {}", p.catchphrases.join(", ")));
+    }
+    if !p.inside_jokes.is_empty() {
+        quirks.push(format!("show callbacks: {}", p.inside_jokes.join(" · ")));
+    }
+    if !quirks.is_empty() {
+        out.push_str("\n\nVoice signatures (use naturally, don't force):");
+        for q in quirks {
+            out.push_str(&format!("\n- {q}"));
+        }
+    }
+
+    // TTS-safety + Kokoro pronunciation. Concrete examples beat vague
+    // rules; concrete > abstract.
+    out.push_str(
+        "\n\nOUTPUT — read aloud by Kokoro TTS:\n\
+         - Plain text only. No Markdown (* _ ` # [ ]), no headings, no bullets, no stage directions.\n\
+         - Spell numbers as words: \"nineteen fifty-nine\" not \"1959\".\n\
+         - Spell abbreviations: \"Mister Davis\" not \"Mr. Davis\", \"Doctor John\" not \"Dr. John\".\n\
+         - Punctuate for breath: comma for a beat, period to stop, em-dash for a longer pause.",
+    );
+    out
+}
+
+/// Render `recent` into a short block to splice into a skill's user
+/// prompt. Empty when there's nothing to say.
+pub(crate) fn recent_context_block(recent: &[RecentSegment]) -> String {
+    if recent.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\n\nWhat just happened on the show (most recent last):");
+    for r in recent {
+        match r {
+            RecentSegment::Track {
+                artist,
+                title,
+                genre,
+            } => {
+                let genre_hint = genre
+                    .as_deref()
+                    .map(|g| format!(" [{g}]"))
+                    .unwrap_or_default();
+                out.push_str(&format!(
+                    "\n  - played: \"{title}\" by {artist}{genre_hint}"
+                ));
+            }
+            RecentSegment::Spoken {
+                kind,
+                script_preview,
+            } => {
+                out.push_str(&format!("\n  - {kind} said: {script_preview}"));
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Host, HostAudio, SkillToggles, Stream};
+    use crate::config::{Host, HostAudio, Personality, Programming, SkillToggles, Stream};
 
     fn persona() -> Persona {
         Persona {
@@ -142,6 +246,8 @@ mod tests {
                 skills: SkillToggles::default(),
                 skill_config: Default::default(),
                 default_llm_backend: None,
+                programming: Programming::default(),
+                personality: Personality::default(),
                 audio: HostAudio {
                     eq_profile: None,
                     room_tone: false,
@@ -163,5 +269,96 @@ mod tests {
         assert!(p.contains("KFLT"));
         assert!(p.contains("1960s"));
         assert!(p.contains("jazz, soul"));
+    }
+
+    #[test]
+    fn system_prompt_always_demands_plain_text() {
+        let p = system_prompt(&persona());
+        // The TTS-safety instruction is non-negotiable — every call gets it.
+        assert!(p.contains("Kokoro TTS"));
+        assert!(p.contains("Plain text only"));
+        assert!(p.contains("No Markdown"));
+    }
+
+    /// Kokoro mispronounces digits, abbreviations, and unpunctuated runs.
+    /// The system prompt must give concrete examples — vague "natural
+    /// speech" instructions don't survive contact with a fast model.
+    #[test]
+    fn system_prompt_gives_kokoro_pronunciation_examples() {
+        let p = system_prompt(&persona());
+        assert!(
+            p.contains("nineteen fifty-nine"),
+            "year-spelling example: {p}"
+        );
+        assert!(p.contains("Mister"), "abbreviation example: {p}");
+        assert!(
+            p.contains("comma") && p.contains("em-dash"),
+            "punctuation guidance: {p}"
+        );
+    }
+
+    #[test]
+    fn system_prompt_weaves_in_personality_when_set() {
+        let mut p = persona();
+        p.host.personality = Personality {
+            signature_opener: Some("Donna here on KFLT.".into()),
+            signature_closer: Some("Stay smooth.".into()),
+            recurring_bits: vec!["I knew Mingus when he was just Chuck.".into()],
+            catchphrases: vec!["sugar".into(), "cats".into()],
+            inside_jokes: vec!["Studio One sessions".into()],
+        };
+        let s = system_prompt(&p);
+        assert!(s.contains("Voice signatures"));
+        assert!(s.contains("opener: Donna here on KFLT."));
+        assert!(s.contains("closer: Stay smooth."));
+        assert!(s.contains("running themes:") && s.contains("Mingus"));
+        assert!(s.contains("catchphrases: sugar, cats"));
+        assert!(s.contains("show callbacks:") && s.contains("Studio One"));
+    }
+
+    #[test]
+    fn system_prompt_skips_empty_personality_fields() {
+        // Default persona has no quirks — the section header itself
+        // should be absent so we don't waste tokens on empty markup.
+        let s = system_prompt(&persona());
+        assert!(!s.contains("Voice signatures"));
+        assert!(!s.contains("opener:"));
+        assert!(!s.contains("catchphrases:"));
+    }
+
+    /// Token-budget sanity check. The prompt should be tight enough
+    /// that even a personality-heavy persona stays well inside common
+    /// model context windows. Anchored at chars; bumping requires intent.
+    #[test]
+    fn system_prompt_stays_compact() {
+        let s = system_prompt(&persona());
+        // Bare persona prompt — identity + tone + output rules.
+        assert!(s.len() < 700, "bare prompt grew to {} chars: {s}", s.len());
+    }
+
+    #[test]
+    fn recent_context_block_empty_when_nothing_recent() {
+        assert!(recent_context_block(&[]).is_empty());
+    }
+
+    #[test]
+    fn recent_context_block_lists_tracks_and_segments() {
+        let recent = vec![
+            RecentSegment::Track {
+                artist: "Miles Davis".into(),
+                title: "So What".into(),
+                genre: Some("Jazz".into()),
+            },
+            RecentSegment::Spoken {
+                kind: "track_intro",
+                script_preview: "Coming up next, the legendary Miles.".into(),
+            },
+        ];
+        let b = recent_context_block(&recent);
+        assert!(b.contains("Miles Davis"));
+        assert!(b.contains("So What"));
+        assert!(b.contains("[Jazz]"));
+        assert!(b.contains("track_intro said"));
+        assert!(b.contains("Coming up next"));
     }
 }

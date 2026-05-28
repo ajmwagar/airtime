@@ -33,17 +33,14 @@ impl Skill for WeatherSkill {
         let system = system_prompt(&ctx.persona);
         let user = match ctx.feeds.weather.as_ref() {
             Some(w) => format!(
-                "Weather right now: {temp:.0}°C, {cond}, wind {wind:.0} kph. \
-                 Give a short weather read in your voice. Max {max} words. Spoken naturally.",
+                "Weather read in your voice. Now: {temp:.0}°C, {cond}, wind {wind:.0} kph. Max {max} words.",
                 temp = w.temperature_c,
                 cond = w.conditions,
                 wind = w.wind_kph,
                 max = cfg.max_words,
             ),
             None => format!(
-                "We don't have a fresh weather reading. Improvise a brief, \
-                 honest weather mention (without making up numbers). \
-                 Max {} words.",
+                "No weather data — improvise honestly, no fake numbers. Max {} words.",
                 cfg.max_words
             ),
         };

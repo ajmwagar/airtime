@@ -13,6 +13,33 @@ by name. Occasionally wistful. Never hurried.
 # `[host.skill_config.X].llm_backend` inherits this. Unset → "ollama".
 default_llm_backend = "openrouter"
 
+[host.programming]
+# How aggressively to filter the library by `host.genre`:
+# strict   — only tracks tagged with one of our genres
+# blended  — ~80% genre-matched, ~20% wildcards (default)
+# free     — no filtering, draws from the whole library
+genre_filter = "blended"
+# When the next track crosses a genre boundary, ask the host to acknowledge
+# the segue in the intro. Off by default.
+narrate_transitions = true
+
+[host.personality]
+# All fields optional — set what you want, omit the rest. Threaded into
+# every system prompt so the LLM picks up the voice.
+signature_opener = "Donna Wavelength on KFLT — the only place that plays the cats who actually showed up to the session."
+signature_closer = "Stay smooth out there."
+recurring_bits = [
+  "knows every session musician by their first name (and one nickname they hate)",
+  "treats the 1965 Modern Jazz Quartet as the high-water mark of civilisation",
+  "occasionally apologises to the night-shift workers listening on a transistor",
+]
+catchphrases = ["sugar", "cats", "honey", "dig it"]
+inside_jokes = [
+  "the legendary Studio One sessions",
+  "that long night at the Five Spot in '63",
+  "her cousin who runs a bait shop in Astoria",
+]
+
 [host.skills]
 track_intro  = true
 track_outro  = true
