@@ -1,8 +1,8 @@
 //! `station_id` — short imager. "You're listening to KFLT…"
 
 use super::base::{
-    render_segment, system_prompt, Skill, SkillContext, SkillError, SkillOutput, SkillRuntime,
-    SKILL_SCORE_BASELINE, SKILL_SCORE_PREFERRED,
+    recent_context_block, render_segment, system_prompt, Skill, SkillContext, SkillError,
+    SkillOutput, SkillRuntime, SKILL_SCORE_BASELINE, SKILL_SCORE_PREFERRED,
 };
 use async_trait::async_trait;
 
@@ -31,10 +31,12 @@ impl Skill for StationIdSkill {
         let cfg = ctx.persona.skill_config(self.name());
         let system = system_prompt(ctx);
         let user = format!(
-            "Drop a station ID for {callsign} ({genres}). Max {max} words.",
+            "Quick station ID for {callsign} ({genres}). One sharp line — \
+             tagline energy, not a paragraph. Max {max} words.{recent}",
             callsign = ctx.persona.host.callsign,
             genres = ctx.persona.host.genre.join(", "),
             max = cfg.max_words,
+            recent = recent_context_block(&ctx.recent),
         );
         let backend = ctx.persona.resolve_llm_backend(self.name());
         let script = rt.llm.complete(&system, &user, &backend).await?;

@@ -41,6 +41,12 @@ pub struct SegmentScheduler {
     /// the skill becomes "overdue" and gets bumped to PREFERRED so it
     /// wins the next break slot.
     last_fired_hour: HashMap<&'static str, u32>,
+    /// Skill name → hour-of-day spec (`"06-10,15-19"`). When the
+    /// current hour matches, the skill gets a PREFERRED-score bump
+    /// regardless of minute — used for tying skills to commute hours,
+    /// late-night blocks, etc. Populated from per-skill
+    /// `[host.skill_config.X].preferred_hours` in the persona TOML.
+    preferred_hours: HashMap<&'static str, String>,
 }
 
 impl SegmentScheduler {
@@ -51,6 +57,7 @@ impl SegmentScheduler {
             tracks_per_break: tracks_per_break.max(1),
             last_break_name: None,
             last_fired_hour: HashMap::new(),
+            preferred_hours: HashMap::new(),
         }
     }
 
@@ -59,6 +66,14 @@ impl SegmentScheduler {
     /// immediately rather than at the next hour boundary.
     pub fn set_tracks_per_break(&mut self, n: usize) {
         self.tracks_per_break = n.max(1);
+    }
+
+    /// Install the per-skill-name → hours-of-day map. Producer builds
+    /// this once at startup from the persona's skill_config. When the
+    /// current hour falls inside a skill's spec, that skill gets a
+    /// PREFERRED-score bump regardless of minute.
+    pub fn set_preferred_hours(&mut self, map: HashMap<&'static str, String>) {
+        self.preferred_hours = map;
     }
 
     /// Returns the kind of segment the scheduler wants next.
@@ -140,16 +155,20 @@ impl SegmentScheduler {
             .iter()
             .filter(|s| !s.needs_track())
             .filter_map(|s| {
-                let base = s.time_score(minute);
+                let mut score = s.time_score(minute);
+                let in_preferred_hour = self
+                    .preferred_hours
+                    .get(s.name())
+                    .map(|spec| crate::config::hours_contain(spec, hour))
+                    .unwrap_or(false);
+                if in_preferred_hour && score < SKILL_SCORE_PREFERRED {
+                    score = SKILL_SCORE_PREFERRED;
+                }
                 let needs_makeup =
                     s.must_fire_per_hour() && self.last_fired_hour.get(s.name()) != Some(&hour);
-                let score = if base > 0 {
-                    base
-                } else if needs_makeup {
-                    SKILL_SCORE_PREFERRED
-                } else {
-                    0
-                };
+                if needs_makeup && score < SKILL_SCORE_PREFERRED {
+                    score = SKILL_SCORE_PREFERRED;
+                }
                 if score > 0 {
                     Some((score, s.clone()))
                 } else {
@@ -475,6 +494,51 @@ mod tests {
         // Switch to a tighter cadence — 3 tracks already played meets quota 2.
         sched.set_tracks_per_break(2);
         assert_eq!(sched.peek_next(12, 0), SlotKind::Break);
+    }
+
+    /// `set_preferred_hours` boosts a skill to PREFERRED regardless of
+    /// minute when the current hour is in its spec — drives commute-hour
+    /// traffic reads, late-night fake-ads, etc.
+    #[test]
+    fn preferred_hours_boost_wins_against_baseline_competitor() {
+        // Two skills, both at baseline at this minute. Traffic gets a
+        // commute-hour boost; weather doesn't — traffic must win.
+        let traffic = Arc::new(Named("traffic", false));
+        let weather = Arc::new(Named("weather", false));
+        let mut sched = SegmentScheduler::new(vec![traffic, weather], 2);
+        let mut hours = HashMap::new();
+        hours.insert("traffic", "06-10".to_string());
+        sched.set_preferred_hours(hours);
+        sched.note_track_played();
+        sched.note_track_played();
+        // Hour 8 is in commute window; minute 33 is no skill's preferred
+        // window so without the boost, both would tie at baseline.
+        let pick = sched.next_break_skill_at(8, 33).unwrap();
+        assert_eq!(pick.name(), "traffic");
+    }
+
+    #[test]
+    fn preferred_hours_outside_spec_does_nothing() {
+        // Traffic at baseline + a Scored competitor pinned to PREFERRED.
+        // Inside commute → traffic ties → could win on rotation. Outside
+        // commute → competitor outranks → competitor wins outright.
+        let traffic = Arc::new(Named("traffic", false));
+        let competitor = Arc::new(Scored {
+            name: "station_id",
+            score_at: |_| SKILL_SCORE_PREFERRED,
+        });
+        let mut sched = SegmentScheduler::new(vec![traffic, competitor], 2);
+        let mut hours = HashMap::new();
+        hours.insert("traffic", "06-10".to_string());
+        sched.set_preferred_hours(hours);
+        sched.note_track_played();
+        sched.note_track_played();
+        let pick = sched.next_break_skill_at(14, 30).unwrap();
+        assert_eq!(
+            pick.name(),
+            "station_id",
+            "outside commute hours, traffic shouldn't get the boost"
+        );
     }
 
     /// `note_break_skipped` resets the cadence so a no-eligible-skill

@@ -5,7 +5,8 @@
 //! instance for the caller voice is Phase 2).
 
 use super::base::{
-    render_segment, system_prompt, Skill, SkillContext, SkillError, SkillOutput, SkillRuntime,
+    recent_context_block, render_segment, system_prompt, Skill, SkillContext, SkillError,
+    SkillOutput, SkillRuntime,
 };
 use async_trait::async_trait;
 
@@ -25,9 +26,10 @@ impl Skill for CallerSkill {
         let cfg = ctx.persona.skill_config(self.name());
         let system = system_prompt(ctx);
         let user = format!(
-            "Fake call-in. Introduce a caller (name + quirk), have them say something brief and odd, \
-             react in your voice. Keep both sides distinct. Max {} words.",
-            cfg.max_words
+            "Fake call-in. Caller name + one quirk, they say something brief and odd, \
+             you react. Keep voices distinct. Max {} words.{}",
+            cfg.max_words,
+            recent_context_block(&ctx.recent),
         );
         let backend = ctx.persona.resolve_llm_backend(self.name());
         let script = rt.llm.complete(&system, &user, &backend).await?;

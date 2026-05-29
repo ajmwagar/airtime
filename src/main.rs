@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -217,6 +217,20 @@ fn spawn_feed_refreshers(feeds: FeedCache, settings: Arc<Settings>) {
     }
 }
 
+/// Walk every skill_config block on the persona, pull out the
+/// `news_sources` lists, flatten and dedupe. Order isn't significant —
+/// the fetcher concatenates results before the top_of_hour skill takes
+/// the first N.
+fn collect_news_sources(persona: &Persona) -> Vec<String> {
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for cfg in persona.host.skill_config.values() {
+        for url in &cfg.news_sources {
+            seen.insert(url.clone());
+        }
+    }
+    seen.into_iter().collect()
+}
+
 async fn run_station(
     persona: Persona,
     settings: Arc<Settings>,
@@ -269,6 +283,26 @@ async fn run_station(
         }
     });
 
+    // Per-station news refresher. Collects RSS sources from every
+    // enabled skill's news_sources, dedupes, and pushes parsed items
+    // into the shared FeedCache every 15 minutes. Without this, the
+    // top_of_hour skill always sees an empty headline list and ends
+    // up improvising ("no headlines today") regardless of how many
+    // news_sources the persona declares.
+    let news_urls = collect_news_sources(&persona);
+    if !news_urls.is_empty() {
+        let news_feeds = feeds.clone();
+        tokio::spawn(async move {
+            let fetcher = NewsFetcher::new();
+            loop {
+                let items = fetcher.fetch_all(&news_urls).await;
+                debug!(count = items.len(), "news refresh");
+                news_feeds.set_news(items).await;
+                tokio::time::sleep(Duration::from_secs(15 * 60)).await;
+            }
+        });
+    }
+
     // Pre-render the silence keepalive file. If ffmpeg isn't reachable
     // (sandbox / misconfig) we silently disable keepalive — the
     // consumer still works, just without the source-timeout safety net.
@@ -303,7 +337,21 @@ async fn run_station(
         .await;
     });
 
-    let scheduler = SegmentScheduler::new(build_enabled(&persona.host.skills), 3);
+    let enabled_skills = build_enabled(&persona.host.skills);
+    // Pull per-skill `preferred_hours` from the persona's skill_config —
+    // names like "traffic" → "06-10,15-19" — and hand them to the
+    // scheduler so commute-hour bumps fire without per-skill code.
+    let preferred_hours: std::collections::HashMap<&'static str, String> = enabled_skills
+        .iter()
+        .filter_map(|s| {
+            persona
+                .skill_config(s.name())
+                .preferred_hours
+                .map(|h| (s.name(), h))
+        })
+        .collect();
+    let mut scheduler = SegmentScheduler::new(enabled_skills, 3);
+    scheduler.set_preferred_hours(preferred_hours);
     let producer = Producer {
         persona,
         library,

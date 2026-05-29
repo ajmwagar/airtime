@@ -1,8 +1,8 @@
 //! `top_of_hour` — DJ reads the news headlines and station ID at the top of the hour.
 
 use super::base::{
-    render_segment, system_prompt, Skill, SkillContext, SkillError, SkillOutput, SkillRuntime,
-    SKILL_SCORE_REQUIRED, SKILL_SCORE_SUPPRESSED,
+    recent_context_block, render_segment, system_prompt, Skill, SkillContext, SkillError,
+    SkillOutput, SkillRuntime, SKILL_SCORE_REQUIRED, SKILL_SCORE_SUPPRESSED,
 };
 use async_trait::async_trait;
 
@@ -51,10 +51,10 @@ impl Skill for TopOfHourSkill {
                 .join("\n")
         };
         let user = format!(
-            "Top of hour: announce {callsign}, then ride these headlines in your voice — paraphrase, \
-             add brief takes, don't quote. Max {max} words.\n\n{headlines}",
-            callsign = ctx.persona.host.callsign,
+            "Top of the hour. Quick station mark, then ride these headlines — paraphrase, \
+             add a take, don't quote. Max {max} words.\n\n{headlines}{recent}",
             max = cfg.max_words,
+            recent = recent_context_block(&ctx.recent),
         );
         let backend = ctx.persona.resolve_llm_backend(self.name());
         let script = rt.llm.complete(&system, &user, &backend).await?;

@@ -189,6 +189,15 @@ pub struct Host {
     /// keep working with no edits.
     #[serde(default)]
     pub personality: Personality,
+    /// Name → IPA pronunciation overrides. Applied as a post-process on
+    /// every TTS script: any whole-word case-insensitive match gets
+    /// wrapped in Kokoro's `[Name](/IPA/)` syntax so the misaki
+    /// tokenizer pronounces it right instead of guessing. Seed it with
+    /// the artists Kokoro mangles — usually non-English names, surnames
+    /// with unusual stress, or proper nouns that share spelling with
+    /// common words ("Sade" reading like "sad-ee").
+    #[serde(default)]
+    pub pronunciations: HashMap<String, String>,
 }
 
 fn default_tracks_per_break() -> usize {
@@ -312,26 +321,70 @@ fn default_genre_filter() -> String {
     "blended".into()
 }
 
+/// Accepts either a TOML string or array of strings; yields `Vec<String>`.
+/// Used so a persona TOML can keep its legacy single-line
+/// `signature_opener = "..."` while new personas can write
+/// `signature_openers = ["...", "...", "..."]` and get rotation.
+fn string_or_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match OneOrMany::deserialize(deserializer)? {
+        OneOrMany::One(s) => vec![s],
+        OneOrMany::Many(v) => v,
+    })
+}
+
 /// Voice quirks — recurring bits, catchphrases, sign-offs that the
 /// system prompt threads into every script the LLM writes.
+///
+/// Sampled per-call: openers/closers pick one at random, catchphrases
+/// and inside_jokes show a small random subset each prompt. Without
+/// sampling the LLM sees the same single opener every time and
+/// reflexively opens with it on every segment — gets stale fast.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Personality {
-    #[serde(default)]
-    pub signature_opener: Option<String>,
-    #[serde(default)]
-    pub signature_closer: Option<String>,
-    /// Lines or themes the host returns to. Listed in the system prompt
-    /// as material the host *can* draw on; the LLM picks naturally.
+    /// One is sampled per prompt. Empty list → no opener line emitted.
+    #[serde(
+        default,
+        alias = "signature_opener",
+        deserialize_with = "string_or_vec"
+    )]
+    pub signature_openers: Vec<String>,
+    /// One is sampled per prompt. Empty list → no closer line emitted.
+    #[serde(
+        default,
+        alias = "signature_closer",
+        deserialize_with = "string_or_vec"
+    )]
+    pub signature_closers: Vec<String>,
+    /// Lines or themes the host returns to. Listed in full in every
+    /// system prompt — these define the character, sampling them would
+    /// make the persona feel inconsistent across segments.
     #[serde(default)]
     pub recurring_bits: Vec<String>,
     /// Short interjections — "sugar", "cats", "dig it" — that flavour
-    /// the host's voice.
+    /// the host's voice. ~3 sampled per prompt for rotation.
     #[serde(default)]
     pub catchphrases: Vec<String>,
     /// Persistent show-internal references — recurring fictional events,
-    /// venues, characters the host alludes to.
+    /// venues, characters the host alludes to. ~2 sampled per prompt.
     #[serde(default)]
     pub inside_jokes: Vec<String>,
+    /// Free-form line about cadence, sentence shape, and energy — fed
+    /// straight into the system prompt so the LLM writes scripts that
+    /// land right when Kokoro reads them. Things like "Clipped — two
+    /// short stabs, then a long sigh." Kokoro has limited prosody
+    /// range; what you write into the text is most of what listeners
+    /// hear.
+    #[serde(default)]
+    pub delivery_notes: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -396,6 +449,14 @@ pub struct SkillConfig {
     pub llm_backend: Option<String>,
     #[serde(default)]
     pub news_sources: Vec<String>,
+    /// Hours-of-day during which this skill gets a PREFERRED-score
+    /// bump regardless of minute. Same `HH-HH` comma-separated syntax
+    /// as `[[host.dayparts]].hours`, midnight wrap supported. Used to
+    /// tie a skill to commute hours, late-night blocks, etc. — e.g.
+    /// `preferred_hours = "06-10,15-19"` on `traffic` so commute reads
+    /// hit often without being locked to a specific minute window.
+    #[serde(default)]
+    pub preferred_hours: Option<String>,
 }
 
 impl Default for SkillConfig {
@@ -404,6 +465,7 @@ impl Default for SkillConfig {
             max_words: default_max_words(),
             llm_backend: None,
             news_sources: Vec::new(),
+            preferred_hours: None,
         }
     }
 }
@@ -424,6 +486,16 @@ pub struct HostAudio {
     #[serde(default)]
     pub room_tone: bool,
     pub loudness_target: f64,
+    /// Kokoro `--speed` multiplier. 1.0 is neutral; ~1.05-1.1 punches
+    /// up a warm voice without making it sound rushed; 1.15+ for
+    /// high-energy hosts. Below 0.9 starts sounding sedated. Persona-
+    /// driven so each host gets their own pace.
+    #[serde(default = "default_speech_speed")]
+    pub speech_speed: f32,
+}
+
+fn default_speech_speed() -> f32 {
+    1.0
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -558,9 +630,60 @@ format = "flac"
     #[test]
     fn personality_defaults_to_empty() {
         let persona: Persona = toml::from_str(DONNA).expect("parse");
-        assert!(persona.host.personality.signature_opener.is_none());
+        assert!(persona.host.personality.signature_openers.is_empty());
         assert!(persona.host.personality.recurring_bits.is_empty());
         assert!(persona.host.personality.catchphrases.is_empty());
+    }
+
+    /// Backwards-compat: legacy `signature_opener = "single string"`
+    /// must still deserialize, normalised into the new Vec<String>.
+    #[test]
+    fn personality_accepts_legacy_singular_opener() {
+        let toml = r#"
+[host]
+name = "X"
+callsign = "X"
+era = "X"
+genre = []
+voice_model = "X"
+tone_prompt = "X"
+[host.skills]
+[host.audio]
+loudness_target = -14.0
+[host.personality]
+signature_opener = "Legacy line."
+signature_closer = "Legacy out."
+[stream]
+mount  = "/x"
+format = "mp3"
+"#;
+        let p: Persona = toml::from_str(toml).expect("parse");
+        assert_eq!(p.host.personality.signature_openers, vec!["Legacy line."]);
+        assert_eq!(p.host.personality.signature_closers, vec!["Legacy out."]);
+    }
+
+    /// New plural form deserializes from an array.
+    #[test]
+    fn personality_accepts_plural_openers_array() {
+        let toml = r#"
+[host]
+name = "X"
+callsign = "X"
+era = "X"
+genre = []
+voice_model = "X"
+tone_prompt = "X"
+[host.skills]
+[host.audio]
+loudness_target = -14.0
+[host.personality]
+signature_openers = ["A", "B", "C"]
+[stream]
+mount  = "/x"
+format = "mp3"
+"#;
+        let p: Persona = toml::from_str(toml).expect("parse");
+        assert_eq!(p.host.personality.signature_openers.len(), 3);
     }
 
     #[test]
@@ -584,7 +707,7 @@ genre_filter = "strict"
 narrate_transitions = true
 
 [host.personality]
-signature_opener = "Hello world."
+signature_openers = ["Hello world.", "Hi there."]
 recurring_bits = ["one", "two"]
 catchphrases = ["sugar"]
 
@@ -595,10 +718,7 @@ format = "mp3"
         let persona: Persona = toml::from_str(toml).expect("parse");
         assert_eq!(persona.host.programming.genre_filter, "strict");
         assert!(persona.host.programming.narrate_transitions);
-        assert_eq!(
-            persona.host.personality.signature_opener.as_deref(),
-            Some("Hello world.")
-        );
+        assert_eq!(persona.host.personality.signature_openers.len(), 2);
         assert_eq!(persona.host.personality.recurring_bits.len(), 2);
         assert_eq!(persona.host.personality.catchphrases, vec!["sugar"]);
     }

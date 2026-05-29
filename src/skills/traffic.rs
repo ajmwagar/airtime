@@ -1,8 +1,8 @@
 //! `traffic` — local incident summary read.
 
 use super::base::{
-    render_segment, system_prompt, Skill, SkillContext, SkillError, SkillOutput, SkillRuntime,
-    SKILL_SCORE_BASELINE, SKILL_SCORE_PREFERRED,
+    recent_context_block, render_segment, system_prompt, Skill, SkillContext, SkillError,
+    SkillOutput, SkillRuntime, SKILL_SCORE_BASELINE, SKILL_SCORE_PREFERRED,
 };
 use async_trait::async_trait;
 
@@ -32,14 +32,17 @@ impl Skill for TrafficSkill {
         let system = system_prompt(ctx);
         let user = match ctx.feeds.traffic.as_ref() {
             Some(t) => format!(
-                "Traffic read in your voice. {summary} ({n} incidents). Max {max} words.",
+                "Quick traffic. {summary} ({n} incidents). Punch the headline, \
+                 skip the throat-clearing. Max {max} words.{recent}",
                 summary = t.summary,
                 n = t.incidents,
                 max = cfg.max_words,
+                recent = recent_context_block(&ctx.recent),
             ),
             None => format!(
-                "No traffic data — keep it brief and honest. Max {} words.",
-                cfg.max_words
+                "Traffic data's out — one honest line. Max {} words.{}",
+                cfg.max_words,
+                recent_context_block(&ctx.recent),
             ),
         };
         let backend = ctx.persona.resolve_llm_backend(self.name());

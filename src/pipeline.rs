@@ -435,6 +435,7 @@ mod tests {
             &self,
             _text: &str,
             _voice: &str,
+            _speed: f32,
             out_dir: &Path,
         ) -> Result<PathBuf, KokoroError> {
             tokio::fs::create_dir_all(out_dir).await?;
@@ -502,10 +503,12 @@ mod tests {
                 default_llm_backend: None,
                 programming: Default::default(),
                 personality: Default::default(),
+                pronunciations: Default::default(),
                 audio: HostAudio {
                     eq_profile: None,
                     room_tone: false,
                     loudness_target: -14.0,
+                    speech_speed: 1.0,
                 },
             },
             stream: Stream {

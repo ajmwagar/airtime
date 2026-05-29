@@ -24,6 +24,98 @@
 //! - smart quotes, regular punctuation
 //! - numerals (TTS pronounces them correctly)
 
+/// Wrap known names in Kokoro's IPA-override syntax so the misaki
+/// tokenizer pronounces them right. Format: `[Name](/IPA/)` — misaki
+/// strips the bracketed display word and uses the IPA in parens.
+///
+/// Whole-word, case-insensitive matching; longest keys win (so "Miles
+/// Davis" matches before "Miles"). Must run AFTER `tts_safe`, since
+/// `tts_safe` strips brackets and would eat our markers. The dict
+/// comes from `[host.pronunciations]` in the persona TOML.
+///
+/// Empty dict → no-op string clone. Names containing characters other
+/// than letters / spaces / apostrophes / hyphens are skipped — the
+/// boundary scan can't safely place them and they'd usually be
+/// spell-checker artefacts anyway.
+///
+/// Single-pass scanner: at each character position, try the longest
+/// matching key; on match, emit the wrap and advance past it (so a
+/// subsequent short key can't re-match inside the wrap). On no match,
+/// copy the char and advance.
+pub fn apply_pronunciations(
+    input: &str,
+    dict: &std::collections::HashMap<String, String>,
+) -> String {
+    if dict.is_empty() {
+        return input.to_string();
+    }
+    let lower_input = input.to_lowercase();
+    // Byte-offset arithmetic requires parallel byte positions; bail
+    // if a Unicode case fold changed the byte length (rare — German ß).
+    if lower_input.len() != input.len() {
+        return input.to_string();
+    }
+    // Pre-sort by lowercased byte length, longest first.
+    let mut keys: Vec<(&String, &String, String)> = dict
+        .iter()
+        .filter(|(k, _)| !k.is_empty() && is_safe_key(k))
+        .map(|(k, v)| (k, v, k.to_lowercase()))
+        .collect();
+    keys.sort_by_key(|(_, _, lower_k)| std::cmp::Reverse(lower_k.len()));
+
+    let bytes = input.as_bytes();
+    let lower_bytes = lower_input.as_bytes();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let before_is_word = input[..i]
+            .chars()
+            .next_back()
+            .map(|c| c.is_alphanumeric())
+            .unwrap_or(false);
+        let mut matched = None;
+        if !before_is_word {
+            for (orig, ipa, lower_k) in &keys {
+                let len = lower_k.len();
+                if i + len > bytes.len() {
+                    continue;
+                }
+                if &lower_bytes[i..i + len] != lower_k.as_bytes() {
+                    continue;
+                }
+                let after_is_word = input[i + len..]
+                    .chars()
+                    .next()
+                    .map(|c| c.is_alphanumeric())
+                    .unwrap_or(false);
+                if !after_is_word {
+                    matched = Some((orig, ipa, len));
+                    break;
+                }
+            }
+        }
+        if let Some((key, ipa, len)) = matched {
+            out.push_str(&format!("[{key}](/{ipa}/)"));
+            i += len;
+        } else {
+            // Walk one char so we don't split multi-byte sequences.
+            let next_char = input[i..].chars().next();
+            if let Some(c) = next_char {
+                out.push(c);
+                i += c.len_utf8();
+            } else {
+                break;
+            }
+        }
+    }
+    out
+}
+
+fn is_safe_key(k: &str) -> bool {
+    k.chars()
+        .all(|c| c.is_alphabetic() || c == ' ' || c == '\'' || c == '-')
+}
+
 /// Strip Markdown/stage-direction markup so the result is safe to feed
 /// to a TTS engine. Idempotent; never lengthens its input.
 pub fn tts_safe(input: &str) -> String {
@@ -140,6 +232,75 @@ mod tests {
         let input = "Good evening Seattle. This is Donna on KFLT.";
         assert_eq!(tts_safe(input), input);
         assert_eq!(tts_safe(&tts_safe(input)), input);
+    }
+
+    fn dict(entries: &[(&str, &str)]) -> std::collections::HashMap<String, String> {
+        entries
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn pronunciations_empty_dict_is_noop() {
+        let d = std::collections::HashMap::new();
+        assert_eq!(
+            apply_pronunciations("Asake is up next", &d),
+            "Asake is up next"
+        );
+    }
+
+    #[test]
+    fn pronunciations_wraps_with_ipa_override() {
+        let d = dict(&[("Asake", "əˈsɑːkeɪ")]);
+        let out = apply_pronunciations("Coming up — Asake.", &d);
+        assert_eq!(out, "Coming up — [Asake](/əˈsɑːkeɪ/).");
+    }
+
+    #[test]
+    fn pronunciations_case_insensitive_match() {
+        let d = dict(&[("Asake", "əˈsɑːkeɪ")]);
+        let out = apply_pronunciations("here's asake again", &d);
+        assert!(out.contains("[Asake](/əˈsɑːkeɪ/)"));
+    }
+
+    #[test]
+    fn pronunciations_respects_word_boundaries() {
+        // "Asakelike" shouldn't match the "Asake" entry.
+        let d = dict(&[("Asake", "əˈsɑːkeɪ")]);
+        let out = apply_pronunciations("Asakelike is not a word", &d);
+        assert_eq!(out, "Asakelike is not a word");
+    }
+
+    #[test]
+    fn pronunciations_longest_match_wins() {
+        // "Miles Davis" must be wrapped as a unit, not as "Miles" + "Davis".
+        let d = dict(&[("Miles", "maɪlz"), ("Miles Davis", "maɪlz ˈdeɪvɪs")]);
+        let out = apply_pronunciations("Miles Davis is on", &d);
+        assert!(
+            out.contains("[Miles Davis](/maɪlz ˈdeɪvɪs/)"),
+            "long form should win: {out}"
+        );
+        assert!(
+            !out.contains("[Miles](/maɪlz/) Davis"),
+            "short form must not also match: {out}"
+        );
+    }
+
+    #[test]
+    fn pronunciations_multiple_entries_in_one_pass() {
+        let d = dict(&[("Asake", "əˈsɑːkeɪ"), ("Burna Boy", "ˈbɜːnə bɔɪ")]);
+        let out = apply_pronunciations("Asake follows Burna Boy.", &d);
+        assert!(out.contains("[Asake](/əˈsɑːkeɪ/)"));
+        assert!(out.contains("[Burna Boy](/ˈbɜːnə bɔɪ/)"));
+    }
+
+    #[test]
+    fn pronunciations_skips_keys_with_unsafe_chars() {
+        // Keys with brackets/parens would break the syntax — silently skip.
+        let d = dict(&[("Bad[Key]", "x"), ("Asake", "əˈsɑːkeɪ")]);
+        let out = apply_pronunciations("Asake is fine", &d);
+        assert!(out.contains("[Asake](/əˈsɑːkeɪ/)"));
     }
 
     #[test]
