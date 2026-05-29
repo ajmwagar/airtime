@@ -17,6 +17,9 @@ default_llm_backend = "openrouter"
 # degrees Fahrenheit, wind eight miles per hour" instead of metric.
 # Set to "metric" for everywhere else.
 units = "imperial"
+# IANA timezone — drives the wall-clock anchor in every prompt so
+# the host says "Pacific" times regardless of the container's TZ.
+timezone = "America/Los_Angeles"
 
 # Music cadence outside any daypart — one talk break every N tracks.
 # Day-parts below can override per-window.

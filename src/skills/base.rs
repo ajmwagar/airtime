@@ -45,6 +45,12 @@ pub struct SkillContext {
     pub hour: u32,
     /// Local wall-clock minute (0..60).
     pub minute: u32,
+    /// Short timezone label for the current moment ("PDT", "EST"),
+    /// DST-aware. Filled by the producer from the persona's clock —
+    /// `None` when the persona didn't specify a timezone. Used to
+    /// give the host a Kokoro-safe regional tag in the spoken time
+    /// phrase ("in the morning, Pacific" vs an untagged time).
+    pub tz_abbrev: Option<String>,
     /// Most-recent-last. Producer maintains; skills read only.
     pub recent: Vec<RecentSegment>,
 }
@@ -172,6 +178,27 @@ pub(crate) async fn render_segment(
 /// host-readable form is `spoken_time_phrase`.
 fn digital_time(hour: u32, minute: u32) -> String {
     format!("{:02}:{:02}", hour.min(23), minute.min(59))
+}
+
+/// Kokoro-safe spoken form of a timezone abbreviation. "PDT" and
+/// "PST" both read as "Pacific", "EDT"/"EST" as "Eastern", etc. —
+/// Kokoro pronounces three-letter codes letter-by-letter, which
+/// sounds wrong on-air. Unknown codes pass through unchanged
+/// (better to read "GMT" as letters than to suppress timezone
+/// information entirely).
+fn tz_region_label(abbrev: &str) -> String {
+    match abbrev {
+        "PST" | "PDT" => "Pacific".into(),
+        "MST" | "MDT" => "Mountain".into(),
+        "CST" | "CDT" => "Central".into(),
+        "EST" | "EDT" => "Eastern".into(),
+        "AKST" | "AKDT" => "Alaska".into(),
+        "HST" | "HDT" => "Hawaii".into(),
+        "GMT" | "UTC" | "Z" => "Greenwich Mean Time".into(),
+        "BST" => "British Summer Time".into(),
+        "CET" | "CEST" => "Central European".into(),
+        other => other.to_string(),
+    }
 }
 
 /// Natural-English rendering of `hour:minute` for the LLM to copy when
@@ -327,11 +354,22 @@ pub(crate) fn system_prompt(ctx: &SkillContext) -> String {
     // "two in the morning" when it's actually 11:33 AM. Naming the
     // current hour explicitly wins because it's the most recent
     // instruction the model sees.
+    let phrase = spoken_time_phrase(ctx.hour, ctx.minute);
+    let tz_suffix = ctx
+        .tz_abbrev
+        .as_deref()
+        .map(tz_region_label)
+        .map(|r| format!(", {r}"))
+        .unwrap_or_default();
     out.push_str(&format!(
-        "\n\nWALL-CLOCK TIME: it is {digital}, which a host says as \"{phrase}\". \
+        "\n\nWALL-CLOCK TIME: it is {digital}{tz_short}, which a host says as \"{phrase}{tz_suffix}\". \
          Reference the time naturally when it fits — never invent a different time of day.",
         digital = digital_time(ctx.hour, ctx.minute),
-        phrase = spoken_time_phrase(ctx.hour, ctx.minute),
+        tz_short = ctx
+            .tz_abbrev
+            .as_deref()
+            .map(|a| format!(" {a}"))
+            .unwrap_or_default(),
     ));
 
     if let Some(dp) = ctx.daypart_tone.as_deref() {
@@ -494,6 +532,7 @@ mod tests {
                 default_llm_backend: None,
                 tracks_per_break: 3,
                 units: "imperial".into(),
+                timezone: None,
                 dayparts: Vec::new(),
                 programming: Programming::default(),
                 personality: Personality::default(),
@@ -521,6 +560,7 @@ mod tests {
             daypart_tone: None,
             hour: 12,
             minute: 0,
+            tz_abbrev: None,
             recent: Vec::new(),
         }
     }
@@ -582,6 +622,59 @@ mod tests {
             p.contains("eleven thirty-three in the morning"),
             "missing spoken phrase: {p}"
         );
+    }
+
+    /// When the producer's clock knows the timezone, the spoken phrase
+    /// gets a region tag ("Pacific") and the digital line gets the
+    /// abbreviation ("PDT"). Without this the host omits the regional
+    /// hook listeners use to orient themselves.
+    #[test]
+    fn system_prompt_carries_timezone_when_known() {
+        let mut c = ctx();
+        c.hour = 11;
+        c.minute = 33;
+        c.tz_abbrev = Some("PDT".into());
+        let p = system_prompt(&c);
+        assert!(p.contains("11:33 PDT"), "digital tz missing: {p}");
+        assert!(
+            p.contains("eleven thirty-three in the morning, Pacific"),
+            "region label missing from spoken phrase: {p}"
+        );
+    }
+
+    /// Without a tz abbreviation, the prompt stays clean — no trailing
+    /// commas or empty parens that the LLM might read verbatim.
+    #[test]
+    fn system_prompt_omits_timezone_when_unknown() {
+        let mut c = ctx();
+        c.hour = 11;
+        c.minute = 33;
+        c.tz_abbrev = None;
+        let p = system_prompt(&c);
+        assert!(p.contains("11:33"), "{p}");
+        assert!(!p.contains("11:33 "), "spurious trailing space: {p}");
+        assert!(
+            !p.contains("in the morning,"),
+            "spurious comma before missing tz: {p}"
+        );
+    }
+
+    #[test]
+    fn tz_region_label_maps_common_abbreviations() {
+        assert_eq!(tz_region_label("PDT"), "Pacific");
+        assert_eq!(tz_region_label("PST"), "Pacific");
+        assert_eq!(tz_region_label("EDT"), "Eastern");
+        assert_eq!(tz_region_label("EST"), "Eastern");
+        assert_eq!(tz_region_label("MST"), "Mountain");
+        assert_eq!(tz_region_label("CDT"), "Central");
+        assert_eq!(tz_region_label("AKDT"), "Alaska");
+        assert_eq!(tz_region_label("HST"), "Hawaii");
+    }
+
+    #[test]
+    fn tz_region_label_passes_through_unknown_abbreviations() {
+        // Better to read "AEDT" as letters than to drop timezone info.
+        assert_eq!(tz_region_label("AEDT"), "AEDT");
     }
 
     #[test]
