@@ -50,6 +50,15 @@ land it on a noun. Question marks tilt up; use to needle the listener.
 Periods over commas where possible — punch the stop.
 """
 
+# Pronunciation overrides for the artists Kokoro otherwise mangles.
+# Whole-word, case-insensitive. IPA only — Wikipedia lead paragraphs
+# are the usual source.
+[host.pronunciations]
+"Asake"        = "əˈsɑːkeɪ"
+"Yaz"          = "jæz"             # Vince Clarke's outfit — not "yawz"
+"Siouxsie"     = "ˈsuːzi"          # "Susie"
+"Echo & the Bunnymen" = "ˈɛkoʊ ænd ðə ˈbʌnimɛn"
+
 # Day-parted programming. Mitch goes harder in morning drive (chatty,
 # caffeinated) and dials back overnight (longer music stretches, fewer
 # fake-ad bursts). `hours = "22-05"` wraps midnight.

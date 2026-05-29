@@ -138,11 +138,15 @@ pub(crate) async fn render_segment(
     script: String,
     segment_type: &'static str,
 ) -> Result<SkillOutput, SkillError> {
+    // Strip markup, then layer in IPA overrides for known names so the
+    // misaki tokenizer says "Asake" right. Order matters: tts_safe eats
+    // brackets, so pronunciations have to run after it.
     let clean = tts_safe(&script);
+    let voiced = crate::text::apply_pronunciations(&clean, &persona.host.pronunciations);
     let wav = rt
         .tts
         .render(
-            &clean,
+            &voiced,
             &persona.host.voice_model,
             persona.host.audio.speech_speed,
             &rt.audio.temp_dir,
@@ -330,6 +334,7 @@ mod tests {
                 dayparts: Vec::new(),
                 programming: Programming::default(),
                 personality: Personality::default(),
+                pronunciations: Default::default(),
                 audio: HostAudio {
                     eq_profile: None,
                     room_tone: false,

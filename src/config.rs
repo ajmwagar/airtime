@@ -189,6 +189,15 @@ pub struct Host {
     /// keep working with no edits.
     #[serde(default)]
     pub personality: Personality,
+    /// Name → IPA pronunciation overrides. Applied as a post-process on
+    /// every TTS script: any whole-word case-insensitive match gets
+    /// wrapped in Kokoro's `[Name](/IPA/)` syntax so the misaki
+    /// tokenizer pronounces it right instead of guessing. Seed it with
+    /// the artists Kokoro mangles — usually non-English names, surnames
+    /// with unusual stress, or proper nouns that share spelling with
+    /// common words ("Sade" reading like "sad-ee").
+    #[serde(default)]
+    pub pronunciations: HashMap<String, String>,
 }
 
 fn default_tracks_per_break() -> usize {

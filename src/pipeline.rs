@@ -503,6 +503,7 @@ mod tests {
                 default_llm_backend: None,
                 programming: Default::default(),
                 personality: Default::default(),
+                pronunciations: Default::default(),
                 audio: HostAudio {
                     eq_profile: None,
                     room_tone: false,

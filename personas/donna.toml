@@ -57,6 +57,16 @@ Em-dashes for the wistful catches. Periods over semicolons. Never more
 than one exclamation per script.
 """
 
+# Pronunciation overrides — Kokoro mangles non-English names and any
+# proper noun that shares spelling with a common word. Add the artists
+# that come up in your library; whole-word, case-insensitive match.
+# IPA format. Wikipedia's lead paragraph is the usual source.
+[host.pronunciations]
+"Asake"       = "əˈsɑːkeɪ"        # the rapper, not the rice wine
+"Sade"        = "ʃɑːˈdeɪ"          # "shar-DAY", not "sad-ee"
+"Thelonious"  = "θəˈloʊniəs"
+"Coltrane"    = "ˈkoʊltreɪn"
+
 # Day-parted programming. First matching window wins (so keep them
 # non-overlapping). `hours = "22-04"` wraps midnight; "06-09" is
 # half-open: 6, 7, 8 (not 9). `extra_tone` is appended to the
