@@ -10,7 +10,7 @@ use airtime::llm::{
 };
 use airtime::mixer::StreamFormat;
 use airtime::pipeline::{
-    run_consumer, ConsumerConfig, KeepaliveConfig, LocalClock, PlayItem, Producer,
+    run_consumer, Clock, ConsumerConfig, KeepaliveConfig, LocalClock, PlayItem, Producer, TzClock,
 };
 use airtime::scheduler::SegmentScheduler;
 use airtime::skills::{build_enabled, SkillRuntime};
@@ -401,6 +401,24 @@ async fn run_station(
         .collect();
     let mut scheduler = SegmentScheduler::new(enabled_skills, 3);
     scheduler.set_preferred_hours(preferred_hours);
+    // Persona-driven timezone. If the TOML names one we pin to that
+    // IANA zone (correct PDT/PST/EDT/etc. regardless of the
+    // container's `TZ`). Otherwise we read system local — which in
+    // an unconfigured container is UTC and probably wrong for radio.
+    let clock: Arc<dyn Clock> = match persona.host.timezone.as_deref() {
+        Some(name) => match name.parse::<chrono_tz::Tz>() {
+            Ok(tz) => Arc::new(TzClock(tz)),
+            Err(_) => {
+                warn!(
+                    callsign = %persona.host.callsign,
+                    timezone = name,
+                    "invalid IANA timezone name in persona — falling back to system local"
+                );
+                Arc::new(LocalClock)
+            }
+        },
+        None => Arc::new(LocalClock),
+    };
     let producer = Producer {
         persona,
         library,
@@ -408,7 +426,7 @@ async fn run_station(
         runtime: rt,
         scheduler,
         history: TrackHistory::default(),
-        clock: Arc::new(LocalClock),
+        clock,
         empty_library_backoff: Duration::from_secs(30),
         recent: Default::default(),
     };

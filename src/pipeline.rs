@@ -66,11 +66,24 @@ impl From<SkillOutput> for PlayItem {
 /// Wall-clock source. The producer reads this each loop to decide
 /// which daypart and break-skill window we're in. Defaults to
 /// `chrono::Local` — tests inject a deterministic clock.
+///
+/// `tz_abbrev` is the short timezone label ("PDT", "EST") for the
+/// current moment — DST-aware. Surfaced into the system prompt so
+/// the host can say "eleven thirty-three in the morning, Pacific"
+/// instead of an untagged time. `None` means "no abbreviation
+/// known", e.g. system-local where the abbrev depends on the
+/// machine's `TZ` env var.
 pub trait Clock: Send + Sync {
     fn hour(&self) -> u32;
     fn minute(&self) -> u32;
+    fn tz_abbrev(&self) -> Option<String> {
+        None
+    }
 }
 
+/// System-local clock — reads whatever timezone the host process is
+/// in. In a stock container without `TZ` set, that's UTC. Prefer
+/// `TzClock` for production stations.
 pub struct LocalClock;
 impl Clock for LocalClock {
     fn hour(&self) -> u32 {
@@ -80,6 +93,31 @@ impl Clock for LocalClock {
     fn minute(&self) -> u32 {
         use chrono::Timelike;
         chrono::Local::now().minute()
+    }
+}
+
+/// Clock pinned to an explicit IANA timezone. The persona's
+/// `host.timezone` drives which `Tz` is used; producer constructs
+/// one of these per station so each market gets its right local
+/// time regardless of what the container's `TZ` is set to.
+pub struct TzClock(pub chrono_tz::Tz);
+impl Clock for TzClock {
+    fn hour(&self) -> u32 {
+        use chrono::Timelike;
+        chrono::Utc::now().with_timezone(&self.0).hour()
+    }
+    fn minute(&self) -> u32 {
+        use chrono::Timelike;
+        chrono::Utc::now().with_timezone(&self.0).minute()
+    }
+    fn tz_abbrev(&self) -> Option<String> {
+        // `chrono-tz`'s `TzOffset` exposes the abbrev for the current
+        // moment — DST-aware, so a Los Angeles clock returns "PDT" in
+        // summer and "PST" in winter. The `abbreviation()` method
+        // lives on the `OffsetName` trait, which has to be in scope.
+        use chrono_tz::OffsetName;
+        let now = chrono::Utc::now().with_timezone(&self.0);
+        Some(now.offset().abbreviation()?.to_string())
     }
 }
 
@@ -160,6 +198,7 @@ impl Producer {
             daypart_tone,
             hour,
             minute,
+            tz_abbrev: self.clock.tz_abbrev(),
             recent: self.recent.iter().cloned().collect(),
         }
     }
@@ -499,6 +538,7 @@ mod tests {
                 skill_config: Default::default(),
                 tracks_per_break: 3,
                 units: "imperial".into(),
+                timezone: None,
                 dayparts: Vec::new(),
                 default_llm_backend: None,
                 programming: Default::default(),

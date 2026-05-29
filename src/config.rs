@@ -173,6 +173,14 @@ pub struct Host {
     /// hour"`) — Kokoro pronounces abbreviations badly.
     #[serde(default = "default_units")]
     pub units: String,
+    /// IANA timezone name (e.g. `"America/Los_Angeles"`,
+    /// `"America/New_York"`) for this station's wall clock. `None`
+    /// falls back to the host process's timezone (`chrono::Local`),
+    /// which in a stock container without `TZ` set is UTC — usually
+    /// not what you want. Setting this per persona is the right move
+    /// when stations live in different markets.
+    #[serde(default)]
+    pub timezone: Option<String>,
     /// Day-part programming — different tracks-per-break cadences and
     /// tonal overlays depending on the hour. First matching daypart
     /// wins (so overlap is operator's problem). Empty means "same

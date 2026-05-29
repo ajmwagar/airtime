@@ -17,6 +17,8 @@ default_llm_backend = "openrouter"
 
 # Mitch is a Florida pirate-radio guy in spirit — Fahrenheit feels right.
 units = "imperial"
+# Mitch is Florida pirate-radio — Eastern time.
+timezone = "America/New_York"
 
 # Mitch talks a lot. One break every track by default.
 tracks_per_break = 1
