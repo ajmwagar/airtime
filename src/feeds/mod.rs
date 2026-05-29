@@ -86,6 +86,9 @@ mod tests {
             .set_traffic(traffic::TrafficNow {
                 summary: "I-5 sluggish".into(),
                 incidents: 2,
+                significant: 1,
+                total_delay_seconds: 300,
+                worst: Vec::new(),
             })
             .await;
         let snap = cache.snapshot().await;
