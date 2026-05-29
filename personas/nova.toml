@@ -2,7 +2,7 @@
 name         = "Nova Ray"
 callsign     = "KPLS"
 era          = "2010s"
-genre        = ["house", "techno", "synth-pop", "future bass", "electronic"]
+genre        = ["house", "techno", "synth-pop", "future bass", "drum and bass", "jungle", "electronic"]
 voice_model  = "af_nova"
 tone_prompt  = """
 Late-night dance-radio energy meets present-day festival hype.
@@ -90,6 +90,16 @@ script, land it on a drop or a producer's name.
 "Jamie xx"  = "ˈdʒeɪmi ɛks ɛks"      # spell out the xx
 "Four Tet"  = "fɔːr tɛt"             # "for tet"
 "Tame Impala" = "teɪm ɪmˈpælə"
+# Jungle / drum and bass — most of these get mangled by default.
+"Goldie"    = "ˈɡoʊldi"
+"LTJ Bukem" = "ɛl tiː dʒeɪ ˈbuːkɛm"
+"Bukem"     = "ˈbuːkɛm"
+"Roni Size" = "ˈroʊni saɪz"
+"Photek"    = "ˈfoʊtɛk"
+"Calibre"   = "ˈkælɪbər"
+"Squarepusher" = "ˈskwɛərˌpʊʃər"
+"Andy C"    = "ˈændi siː"
+"Noisia"    = "ˈnɔɪziə"              # NOY-zee-uh, not noy-SEE-uh
 
 # Day-parted programming. Electronic stations have natural peaks —
 # late evening through the small hours is the headliner slot. Daytime
@@ -101,7 +111,9 @@ tracks_per_break = 3
 extra_tone = """
 Peak hours. The dance floor is full. Forward, hyped, but in
 control — Nova's the curator, not the hype-man. Longer music
-runs between breaks; the listeners are committed.
+runs between breaks; the listeners are committed. Jungle and
+drum and bass land hardest in this window — lean into the
+breakbeats and the bass when they come up.
 """
 
 [[host.dayparts]]
