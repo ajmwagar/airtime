@@ -167,13 +167,146 @@ pub(crate) async fn render_segment(
     })
 }
 
+/// 24-hour `HH:MM` for the wall-clock anchor in the prompt. Plain
+/// digits — the LLM uses this to reason about time of day; the
+/// host-readable form is `spoken_time_phrase`.
+fn digital_time(hour: u32, minute: u32) -> String {
+    format!("{:02}:{:02}", hour.min(23), minute.min(59))
+}
+
+/// Natural-English rendering of `hour:minute` for the LLM to copy when
+/// referencing the time on-air. Examples:
+///   06:00 → "six in the morning"
+///   11:33 → "eleven thirty-three in the morning"
+///   12:00 → "noon"
+///   13:00 → "one in the afternoon"
+///   17:45 → "five forty-five in the afternoon"
+///   20:00 → "eight in the evening"
+///   23:33 → "eleven thirty-three at night"
+///   00:00 → "midnight"
+///   00:15 → "twelve fifteen in the small hours"
+///
+/// Numbers are spelled out so Kokoro reads them right (digit-by-digit
+/// is its default failure mode). The period-of-day suffix
+/// disambiguates morning vs evening without relying on AM/PM, which
+/// Kokoro mispronounces as letters.
+fn spoken_time_phrase(hour: u32, minute: u32) -> String {
+    let hour = hour.min(23);
+    let minute = minute.min(59);
+    // Named edge cases first — these read more naturally without
+    // numeric padding.
+    if minute == 0 {
+        if hour == 0 {
+            return "midnight".into();
+        }
+        if hour == 12 {
+            return "noon".into();
+        }
+    }
+    let (h12, period) = match hour {
+        0 => (12, "in the small hours"),
+        1..=4 => (hour, "in the small hours"),
+        5..=11 => (hour, "in the morning"),
+        12 => (12, "in the afternoon"),
+        13..=17 => (hour - 12, "in the afternoon"),
+        18..=20 => (hour - 12, "in the evening"),
+        21..=23 => (hour - 12, "at night"),
+        _ => (hour, "in the morning"),
+    };
+    let h_word = hour_word(h12);
+    if minute == 0 {
+        format!("{h_word} {period}")
+    } else {
+        format!("{h_word} {minutes} {period}", minutes = minute_word(minute))
+    }
+}
+
+fn hour_word(h: u32) -> &'static str {
+    match h {
+        1 => "one",
+        2 => "two",
+        3 => "three",
+        4 => "four",
+        5 => "five",
+        6 => "six",
+        7 => "seven",
+        8 => "eight",
+        9 => "nine",
+        10 => "ten",
+        11 => "eleven",
+        12 => "twelve",
+        _ => "twelve",
+    }
+}
+
+/// Minutes 1..=59 as the host would say them. 1..9 become "oh one",
+/// "oh two" etc. so the rhythm sounds right ("ten oh five in the
+/// morning"), not "ten five in the morning".
+fn minute_word(m: u32) -> String {
+    let m = m.min(59);
+    let tens = m / 10;
+    let ones = m % 10;
+    if m < 10 {
+        format!("oh {}", digit_word(ones))
+    } else if m < 20 {
+        teen_word(m).into()
+    } else if ones == 0 {
+        tens_word(tens).into()
+    } else {
+        format!("{}-{}", tens_word(tens), digit_word(ones))
+    }
+}
+
+fn digit_word(d: u32) -> &'static str {
+    match d {
+        0 => "zero",
+        1 => "one",
+        2 => "two",
+        3 => "three",
+        4 => "four",
+        5 => "five",
+        6 => "six",
+        7 => "seven",
+        8 => "eight",
+        9 => "nine",
+        _ => "",
+    }
+}
+
+fn teen_word(m: u32) -> &'static str {
+    match m {
+        10 => "ten",
+        11 => "eleven",
+        12 => "twelve",
+        13 => "thirteen",
+        14 => "fourteen",
+        15 => "fifteen",
+        16 => "sixteen",
+        17 => "seventeen",
+        18 => "eighteen",
+        19 => "nineteen",
+        _ => "",
+    }
+}
+
+fn tens_word(t: u32) -> &'static str {
+    match t {
+        2 => "twenty",
+        3 => "thirty",
+        4 => "forty",
+        5 => "fifty",
+        _ => "",
+    }
+}
+
 /// Build the system prompt for a skill call.
 ///
 /// Sections in order:
 ///   1. Identity + tone (one sentence).
-///   2. Daypart overlay (only when active — keeps off-hours personas tight).
-///   3. Voice signatures (personality block — only emitted when populated).
-///   4. **Kokoro output rules** — concrete failure-mode examples. The LLM
+///   2. Wall-clock anchor (every call — kills "2 AM at 11 AM" drift).
+///   3. Daypart overlay (only when active — keeps off-hours personas tight).
+///   4. Voice signatures (personality block — only emitted when populated).
+///   5. **Kokoro output rules** — concrete failure-mode examples. The LLM
 ///      otherwise reflex-emits Markdown and ALL-CAPS abbreviations, and
 ///      Kokoro then pronounces every `*` as "asterisk" and `RPM` as
 ///      "are pee em". Generic "speak naturally" instructions don't
@@ -188,6 +321,18 @@ pub(crate) fn system_prompt(ctx: &SkillContext) -> String {
         genres = persona.host.genre.join(", "),
         tone = persona.host.tone_prompt.trim(),
     );
+
+    // Wall-clock anchor. Without this, the LLM keys on the persona's
+    // tone copy ("late-night jazz host") and routinely says
+    // "two in the morning" when it's actually 11:33 AM. Naming the
+    // current hour explicitly wins because it's the most recent
+    // instruction the model sees.
+    out.push_str(&format!(
+        "\n\nWALL-CLOCK TIME: it is {digital}, which a host says as \"{phrase}\". \
+         Reference the time naturally when it fits — never invent a different time of day.",
+        digital = digital_time(ctx.hour, ctx.minute),
+        phrase = spoken_time_phrase(ctx.hour, ctx.minute),
+    ));
 
     if let Some(dp) = ctx.daypart_tone.as_deref() {
         out.push_str(&format!("\n\nRight now: {}", dp.trim()));
@@ -420,6 +565,70 @@ mod tests {
     fn system_prompt_skips_daypart_when_unset() {
         let p = system_prompt(&ctx());
         assert!(!p.contains("Right now:"));
+    }
+
+    /// Wall-clock anchor is the fix for "two in the morning at eleven AM"
+    /// drift. Must appear in every prompt with both the digital time and
+    /// the spoken phrase so the LLM has nothing to misread.
+    #[test]
+    fn system_prompt_includes_wall_clock_time() {
+        let mut c = ctx();
+        c.hour = 11;
+        c.minute = 33;
+        let p = system_prompt(&c);
+        assert!(p.contains("WALL-CLOCK TIME"), "missing anchor: {p}");
+        assert!(p.contains("11:33"), "missing digital time: {p}");
+        assert!(
+            p.contains("eleven thirty-three in the morning"),
+            "missing spoken phrase: {p}"
+        );
+    }
+
+    #[test]
+    fn spoken_time_phrase_named_edges() {
+        assert_eq!(spoken_time_phrase(0, 0), "midnight");
+        assert_eq!(spoken_time_phrase(12, 0), "noon");
+    }
+
+    #[test]
+    fn spoken_time_phrase_morning_afternoon_evening_night() {
+        assert_eq!(spoken_time_phrase(6, 0), "six in the morning");
+        assert_eq!(
+            spoken_time_phrase(11, 33),
+            "eleven thirty-three in the morning"
+        );
+        assert_eq!(spoken_time_phrase(13, 0), "one in the afternoon");
+        assert_eq!(
+            spoken_time_phrase(17, 45),
+            "five forty-five in the afternoon"
+        );
+        assert_eq!(spoken_time_phrase(20, 0), "eight in the evening");
+        assert_eq!(spoken_time_phrase(23, 33), "eleven thirty-three at night");
+    }
+
+    /// Single-digit minutes read as "oh five", not "five" — so the
+    /// rhythm of the spoken phrase matches how a real DJ says the time.
+    #[test]
+    fn spoken_time_phrase_oh_minutes_under_ten() {
+        assert_eq!(spoken_time_phrase(10, 5), "ten oh five in the morning");
+        assert_eq!(spoken_time_phrase(8, 9), "eight oh nine in the morning");
+    }
+
+    #[test]
+    fn spoken_time_phrase_small_hours() {
+        assert_eq!(
+            spoken_time_phrase(0, 15),
+            "twelve fifteen in the small hours"
+        );
+        assert_eq!(spoken_time_phrase(2, 0), "two in the small hours");
+        assert_eq!(spoken_time_phrase(4, 30), "four thirty in the small hours");
+    }
+
+    #[test]
+    fn digital_time_is_zero_padded() {
+        assert_eq!(digital_time(0, 0), "00:00");
+        assert_eq!(digital_time(9, 5), "09:05");
+        assert_eq!(digital_time(23, 59), "23:59");
     }
 
     /// Concrete per-punctuation pacing examples and a rhythm note are
