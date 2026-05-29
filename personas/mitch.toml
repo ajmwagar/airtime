@@ -18,8 +18,8 @@ default_llm_backend = "openrouter"
 # Mitch is a Florida pirate-radio guy in spirit — Fahrenheit feels right.
 units = "imperial"
 
-# Mitch talks a lot. One break every two tracks by default.
-tracks_per_break = 2
+# Mitch talks a lot. One break every track by default.
+tracks_per_break = 1
 
 [host.programming]
 # Mitch goes hard on the format — strict means no jazz crashes the party.
@@ -65,7 +65,7 @@ Periods over commas where possible — punch the stop.
 [[host.dayparts]]
 name = "morning_drive"
 hours = "06-10"
-tracks_per_break = 2
+tracks_per_break = 1
 extra_tone = """
 Morning-drive mode. Caffeinated, fast, a little unhinged.
 Headlines, traffic, weather, repeat. Keep the energy up.
@@ -74,7 +74,7 @@ Headlines, traffic, weather, repeat. Keep the energy up.
 [[host.dayparts]]
 name = "overnight"
 hours = "22-05"
-tracks_per_break = 4
+tracks_per_break = 1
 extra_tone = """
 Overnight pirate-radio vibe. Conspiratorial whisper-shouts.
 Longer music runs between breaks; the freaks are listening.
@@ -94,6 +94,14 @@ caller       = true
 max_words    = 70
 llm_backend  = "openrouter"
 news_sources = ["https://feeds.npr.org/1001/rss.xml"]
+
+[host.skill_config.traffic]
+max_words    = 30
+llm_backend  = "openrouter"
+# Commute-hour bump: during these hours, traffic auto-scores PREFERRED
+# regardless of minute, so commute reads land often. Outside these
+# windows, the time_score-driven :21-:24 / :51-:54 prefs still apply.
+preferred_hours = "06-10,15-19"
 
 [host.skill_config.fake_ad]
 max_words    = 90

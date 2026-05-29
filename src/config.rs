@@ -413,6 +413,14 @@ pub struct SkillConfig {
     pub llm_backend: Option<String>,
     #[serde(default)]
     pub news_sources: Vec<String>,
+    /// Hours-of-day during which this skill gets a PREFERRED-score
+    /// bump regardless of minute. Same `HH-HH` comma-separated syntax
+    /// as `[[host.dayparts]].hours`, midnight wrap supported. Used to
+    /// tie a skill to commute hours, late-night blocks, etc. — e.g.
+    /// `preferred_hours = "06-10,15-19"` on `traffic` so commute reads
+    /// hit often without being locked to a specific minute window.
+    #[serde(default)]
+    pub preferred_hours: Option<String>,
 }
 
 impl Default for SkillConfig {
@@ -421,6 +429,7 @@ impl Default for SkillConfig {
             max_words: default_max_words(),
             llm_backend: None,
             news_sources: Vec::new(),
+            preferred_hours: None,
         }
     }
 }
