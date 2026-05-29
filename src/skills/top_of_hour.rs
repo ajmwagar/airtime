@@ -39,23 +39,37 @@ impl Skill for TopOfHourSkill {
     ) -> Result<SkillOutput, SkillError> {
         let cfg = ctx.persona.skill_config(self.name());
         let system = system_prompt(ctx);
-        let headlines = if ctx.feeds.news.is_empty() {
-            "(no headlines available)".to_string()
+        // Two prompt branches: with headlines, ride them in voice; with
+        // no headlines, do a brief station mark only. Without the split,
+        // the LLM gets "(no headlines available)" and produces a
+        // top-of-hour segment that says nothing — listeners don't even
+        // recognize it as a news slot. A clean station mark is more
+        // honest and feels intentional.
+        let user = if ctx.feeds.news.is_empty() {
+            format!(
+                "Top of the hour, but no headlines came in this cycle. \
+                 Skip the news — give a clean station mark only: callsign, \
+                 hour-ish vibe, hand back to music. One or two sentences. \
+                 Max {max} words.{recent}",
+                max = (cfg.max_words / 2).max(15),
+                recent = recent_context_block(&ctx.recent),
+            )
         } else {
-            ctx.feeds
+            let headlines = ctx
+                .feeds
                 .news
                 .iter()
                 .take(5)
                 .map(|i| format!("- {}", i.title))
                 .collect::<Vec<_>>()
-                .join("\n")
+                .join("\n");
+            format!(
+                "Top of the hour. Quick station mark, then ride these headlines — paraphrase, \
+                 add a take, don't quote. Max {max} words.\n\n{headlines}{recent}",
+                max = cfg.max_words,
+                recent = recent_context_block(&ctx.recent),
+            )
         };
-        let user = format!(
-            "Top of the hour. Quick station mark, then ride these headlines — paraphrase, \
-             add a take, don't quote. Max {max} words.\n\n{headlines}{recent}",
-            max = cfg.max_words,
-            recent = recent_context_block(&ctx.recent),
-        );
         let backend = ctx.persona.resolve_llm_backend(self.name());
         let script = rt.llm.complete(&system, &user, &backend).await?;
         render_segment(rt, &ctx.persona, script, "top_of_hour").await
