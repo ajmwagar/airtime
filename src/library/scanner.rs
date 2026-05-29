@@ -124,6 +124,11 @@ impl MusicLibrary {
     ///   - `"blended"` → ~80 % genre-matched, ~20 % wildcards;
     ///   - `"free"`    → ignore `genres`, just avoid the history.
     ///
+    /// Artist spacing layers on top of every selection: among the
+    /// candidates that survive the path-history + genre filters,
+    /// tracks whose artist isn't in the recent artist ring win, with a
+    /// cascading fallback so a small library stays playable.
+    ///
     /// Falls back gracefully when the strict pool would be empty
     /// (no tagged tracks, or every match is in the history): degrades
     /// to a wildcard pick instead of refusing to return anything.
@@ -152,17 +157,13 @@ impl MusicLibrary {
 
         let want_filter = matches!(mode, "strict" | "blended") && !genres.is_empty();
         if !want_filter {
-            return wildcard_pool
-                .choose(&mut rand::thread_rng())
-                .map(|t| (*t).clone());
+            return pick_with_artist_spacing(&wildcard_pool, history).cloned();
         }
 
         // 20 % of the time in blended mode, ignore the filter so the
         // station stays surprising.
         if mode == "blended" && rand::thread_rng().gen_bool(0.20) {
-            return wildcard_pool
-                .choose(&mut rand::thread_rng())
-                .map(|t| (*t).clone());
+            return pick_with_artist_spacing(&wildcard_pool, history).cloned();
         }
 
         let matched: Vec<&Track> = wildcard_pool
@@ -174,13 +175,9 @@ impl MusicLibrary {
         // Fall through if nothing matches. Better to play something off-genre
         // than to play silence.
         if matched.is_empty() {
-            return wildcard_pool
-                .choose(&mut rand::thread_rng())
-                .map(|t| (*t).clone());
+            return pick_with_artist_spacing(&wildcard_pool, history).cloned();
         }
-        matched
-            .choose(&mut rand::thread_rng())
-            .map(|t| (*t).clone())
+        pick_with_artist_spacing(&matched, history).cloned()
     }
 
     /// Test-only: bypass the filesystem walk and seed the index directly.
@@ -190,20 +187,107 @@ impl MusicLibrary {
     }
 }
 
-/// Does `track`'s tag match any of `genres`? Case-insensitive, with
-/// substring matching in both directions: persona genre `"jazz"` hits
-/// track tag `"Soul Jazz"`, and persona genre `"new wave"` hits track
-/// tag `"new-wave"`. Conservative enough that mistuned tags don't
-/// leak across genres in `strict` mode.
+/// Does `track`'s tag match any of `genres`? Match is case-insensitive,
+/// punctuation-tolerant, and alias-aware. Substring match runs in both
+/// directions after both sides are canonicalised, so persona `"jazz"`
+/// hits track tag `"Soul Jazz"`, persona `"drum and bass"` hits tag
+/// `"Drum & Bass"`, and persona `"dnb"` hits both.
 fn track_matches_genres(track: &Track, genres: &[String]) -> bool {
     let Some(tag) = track.genre.as_deref() else {
         return false;
     };
-    let tag_lower = tag.to_lowercase();
+    let tag_canon = canonicalize_genre(tag);
+    if tag_canon.is_empty() {
+        return false;
+    }
     genres.iter().any(|g| {
-        let g_lower = g.to_lowercase();
-        tag_lower.contains(&g_lower) || g_lower.contains(&tag_lower)
+        let g_canon = canonicalize_genre(g);
+        !g_canon.is_empty() && (tag_canon.contains(&g_canon) || g_canon.contains(&tag_canon))
     })
+}
+
+/// Canonical form for genre matching:
+///   - lowercase
+///   - `&` and `'n'` / `n'` rendered as `and`
+///   - separators (-, _, /, \, parens, slashes) collapsed to spaces
+///   - whitespace runs collapsed to single space, trimmed
+///   - common abbreviations expanded via `GENRE_ALIASES`
+///
+/// Empty string for empty / pure-punctuation input.
+fn canonicalize_genre(s: &str) -> String {
+    let lower = s.to_lowercase();
+    // Normalise the "and" connector before stripping punctuation so we
+    // don't lose information ("R&B" should land on "rhythm and blues",
+    // not "rb").
+    let connector = lower
+        .replace('&', " and ")
+        .replace(" n' ", " and ")
+        .replace(" 'n' ", " and ")
+        .replace(" n ", " and ");
+    let separator_swapped: String = connector
+        .chars()
+        .map(|c| match c {
+            '_' | '-' | '/' | '\\' | '(' | ')' | '[' | ']' | '.' | ',' | ';' | ':' => ' ',
+            c => c,
+        })
+        .collect();
+    let collapsed: String = separator_swapped
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    // Alias resolution: if the whole string matches a known shorthand,
+    // return its canonical form. Partial-string substitution stays out
+    // of scope — we only canonicalise exact terms so we don't mangle
+    // compound tags like "dnb fusion".
+    for (canonical, aliases) in GENRE_ALIASES {
+        if aliases.iter().any(|a| *a == collapsed) {
+            return (*canonical).into();
+        }
+    }
+    collapsed
+}
+
+/// Genre name → its known shorthand aliases. Lookup is exact-match on
+/// the canonicalised input; keep the list small and high-confidence.
+const GENRE_ALIASES: &[(&str, &[&str])] = &[
+    (
+        "drum and bass",
+        &["dnb", "d n b", "drum n bass", "drum and bass"],
+    ),
+    (
+        "rhythm and blues",
+        &["rnb", "r and b", "r n b", "rhythm and blues"],
+    ),
+    (
+        "intelligent dance music",
+        &["idm", "intelligent dance music"],
+    ),
+    ("electronic dance music", &["edm", "electronic dance music"]),
+    ("hip hop", &["hip hop", "hiphop"]),
+];
+
+/// Cascading random pick that prefers artists not in the recent ring:
+/// first tries the (artist-fresh ∩ pool) subset, falls back to the
+/// full pool if it's empty. Used after the path-history + genre
+/// filters so a tight library stays playable.
+fn pick_with_artist_spacing<'a>(
+    pool: &[&'a Track],
+    history: &super::history::TrackHistory,
+) -> Option<&'a Track> {
+    if pool.is_empty() {
+        return None;
+    }
+    let artist_fresh: Vec<&Track> = pool
+        .iter()
+        .copied()
+        .filter(|t| !history.contains_artist(&t.artist))
+        .collect();
+    let final_pool: &[&Track] = if !artist_fresh.is_empty() {
+        &artist_fresh
+    } else {
+        pool
+    };
+    final_pool.choose(&mut rand::thread_rng()).copied()
 }
 
 fn walk(root: &Path) -> Vec<Track> {
@@ -418,6 +502,108 @@ mod tests {
             }
         }
         assert!(seen_synth, "free mode should not filter on genre");
+    }
+
+    /// Genre matching now normalises punctuation: persona genre
+    /// "drum and bass" must hit a tag of "Drum & Bass" (the spelling
+    /// most tagging tools use). The previous substring-only match
+    /// missed this and the persona's dnb files never played.
+    #[tokio::test]
+    async fn pick_matches_drum_and_bass_against_ampersand_tag() {
+        let lib = MusicLibrary::new();
+        lib.seed_for_test(vec![
+            fake_track_with_genre("/a.flac", "Drum & Bass"),
+            fake_track_with_genre("/b.flac", "Drum & Bass"),
+            fake_track_with_genre("/c.flac", "Folk"),
+        ])
+        .await;
+        let hist = super::super::history::TrackHistory::new(0);
+        let genres = vec!["drum and bass".into()];
+        for _ in 0..20 {
+            let pick = lib.pick(&hist, &genres, "strict").await.unwrap();
+            assert_ne!(
+                pick.path,
+                PathBuf::from("/c.flac"),
+                "strict matched off-genre Folk"
+            );
+        }
+    }
+
+    /// Alias map: persona genre "dnb" must hit tag "Drum & Bass" and
+    /// vice versa — same canonical form. Without aliases the shorthand
+    /// just silently dropped tracks.
+    #[tokio::test]
+    async fn pick_matches_dnb_alias_against_drum_and_bass_tag() {
+        let lib = MusicLibrary::new();
+        lib.seed_for_test(vec![
+            fake_track_with_genre("/a.flac", "Drum & Bass"),
+            fake_track_with_genre("/b.flac", "Trance"),
+        ])
+        .await;
+        let hist = super::super::history::TrackHistory::new(0);
+        let genres = vec!["dnb".into()];
+        for _ in 0..10 {
+            let pick = lib.pick(&hist, &genres, "strict").await.unwrap();
+            assert_eq!(pick.path, PathBuf::from("/a.flac"));
+        }
+    }
+
+    /// Artist spacing is now applied inside `pick` after the genre
+    /// filter. Previously the artist ring was only consulted by
+    /// `pick_random_avoiding`, so the genre-aware path repeated artists
+    /// freely.
+    #[tokio::test]
+    async fn pick_spaces_out_artists_within_genre() {
+        let lib = MusicLibrary::new();
+        lib.seed_for_test(vec![
+            artist_track_with_genre("/m1.flac", "Miles Davis", "Jazz"),
+            artist_track_with_genre("/m2.flac", "Miles Davis", "Jazz"),
+            artist_track_with_genre("/c1.flac", "John Coltrane", "Jazz"),
+            artist_track_with_genre("/c2.flac", "John Coltrane", "Jazz"),
+        ])
+        .await;
+        let mut hist = super::super::history::TrackHistory::new(8);
+        hist.record(PathBuf::from("/m1.flac"), "Miles Davis");
+        let genres = vec!["jazz".into()];
+        for _ in 0..10 {
+            let pick = lib.pick(&hist, &genres, "strict").await.unwrap();
+            assert_eq!(
+                pick.artist, "John Coltrane",
+                "pick should prefer artist-fresh Coltrane over more Miles within Jazz"
+            );
+        }
+    }
+
+    fn artist_track_with_genre(path: &str, artist: &str, genre: &str) -> Track {
+        let mut t = fake_track_with_genre(path, genre);
+        t.artist = artist.into();
+        t
+    }
+
+    /// Canonicalisation unit tests — locks in the punctuation and alias
+    /// rules so regressions here don't silently break genre matching.
+    #[test]
+    fn canonicalize_genre_normalises_ampersand_and_separators() {
+        assert_eq!(canonicalize_genre("Drum & Bass"), "drum and bass");
+        assert_eq!(canonicalize_genre("drum-and-bass"), "drum and bass");
+        assert_eq!(canonicalize_genre("Hip-Hop"), "hip hop");
+        assert_eq!(canonicalize_genre("R&B"), "rhythm and blues");
+        assert_eq!(canonicalize_genre("post.rock"), "post rock");
+    }
+
+    #[test]
+    fn canonicalize_genre_resolves_aliases() {
+        assert_eq!(canonicalize_genre("dnb"), "drum and bass");
+        assert_eq!(canonicalize_genre("DnB"), "drum and bass");
+        assert_eq!(canonicalize_genre("idm"), "intelligent dance music");
+        assert_eq!(canonicalize_genre("rnb"), "rhythm and blues");
+    }
+
+    #[test]
+    fn canonicalize_genre_empty_for_empty_input() {
+        assert_eq!(canonicalize_genre(""), "");
+        assert_eq!(canonicalize_genre("   "), "");
+        assert_eq!(canonicalize_genre("---"), "");
     }
 
     #[tokio::test]
