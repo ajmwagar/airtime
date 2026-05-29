@@ -193,23 +193,41 @@ pub(crate) fn system_prompt(ctx: &SkillContext) -> String {
         out.push_str(&format!("\n\nRight now: {}", dp.trim()));
     }
 
-    // Personality block — only emitted when there's something to put in it.
+    // Personality block — sampled per call so the LLM doesn't reflex
+    // into the same opener every segment. Openers/closers pick one;
+    // catchphrases + inside_jokes show a small subset. recurring_bits
+    // stays in full (those define character, sampling makes the host
+    // feel inconsistent across segments).
+    use rand::seq::{IteratorRandom, SliceRandom};
     let p = &persona.host.personality;
-    let mut quirks = Vec::with_capacity(5);
-    if let Some(o) = p.signature_opener.as_deref() {
+    let mut rng = rand::thread_rng();
+    let mut quirks: Vec<String> = Vec::with_capacity(5);
+    if let Some(o) = p.signature_openers.choose(&mut rng) {
         quirks.push(format!("opener: {o}"));
     }
-    if let Some(c) = p.signature_closer.as_deref() {
+    if let Some(c) = p.signature_closers.choose(&mut rng) {
         quirks.push(format!("closer: {c}"));
     }
     if !p.recurring_bits.is_empty() {
         quirks.push(format!("running themes: {}", p.recurring_bits.join(" · ")));
     }
     if !p.catchphrases.is_empty() {
-        quirks.push(format!("catchphrases: {}", p.catchphrases.join(", ")));
+        let picks: Vec<&String> = p.catchphrases.iter().choose_multiple(&mut rng, 3);
+        let joined = picks
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        quirks.push(format!("catchphrases (rotation): {joined}"));
     }
     if !p.inside_jokes.is_empty() {
-        quirks.push(format!("show callbacks: {}", p.inside_jokes.join(" · ")));
+        let picks: Vec<&String> = p.inside_jokes.iter().choose_multiple(&mut rng, 2);
+        let joined = picks
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join(" · ");
+        quirks.push(format!("show callbacks (rotation): {joined}"));
     }
     if !quirks.is_empty() {
         out.push_str("\n\nVoice signatures (use naturally, don't force):");
@@ -420,12 +438,15 @@ mod tests {
 
     #[test]
     fn system_prompt_weaves_in_personality_when_set() {
+        // Single-element lists make the sampling deterministic so the
+        // test can assert exact strings; rotation behaviour is exercised
+        // by `system_prompt_rotates_openers_across_calls` below.
         let mut c = ctx();
         c.persona.host.personality = Personality {
-            signature_opener: Some("Donna here on KFLT.".into()),
-            signature_closer: Some("Stay smooth.".into()),
+            signature_openers: vec!["Donna here on KFLT.".into()],
+            signature_closers: vec!["Stay smooth.".into()],
             recurring_bits: vec!["I knew Mingus when he was just Chuck.".into()],
-            catchphrases: vec!["sugar".into(), "cats".into()],
+            catchphrases: vec!["sugar".into()],
             inside_jokes: vec!["Studio One sessions".into()],
             delivery_notes: Some("Sparse. Short stabs. Em-dashes for the catches.".into()),
         };
@@ -434,12 +455,61 @@ mod tests {
         assert!(s.contains("opener: Donna here on KFLT."));
         assert!(s.contains("closer: Stay smooth."));
         assert!(s.contains("running themes:") && s.contains("Mingus"));
-        assert!(s.contains("catchphrases: sugar, cats"));
+        assert!(s.contains("catchphrases") && s.contains("sugar"));
         assert!(
             s.contains("Delivery") && s.contains("Em-dashes"),
             "delivery notes missing: {s}"
         );
-        assert!(s.contains("show callbacks:") && s.contains("Studio One"));
+        assert!(s.contains("show callbacks") && s.contains("Studio One"));
+    }
+
+    /// Sampling: across many calls, the prompt must surface multiple
+    /// distinct openers — proves the rotation isn't degenerate. Five
+    /// openers, sample over 50 calls, demand at least 3 distinct.
+    #[test]
+    fn system_prompt_rotates_openers_across_calls() {
+        let mut c = ctx();
+        c.persona.host.personality = Personality {
+            signature_openers: vec![
+                "Alpha line.".into(),
+                "Bravo line.".into(),
+                "Charlie line.".into(),
+                "Delta line.".into(),
+                "Echo line.".into(),
+            ],
+            ..Default::default()
+        };
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for _ in 0..50 {
+            let s = system_prompt(&c);
+            for needle in ["Alpha", "Bravo", "Charlie", "Delta", "Echo"] {
+                if s.contains(needle) {
+                    seen.insert(needle.to_string());
+                }
+            }
+        }
+        assert!(
+            seen.len() >= 3,
+            "rotation should surface ≥3 distinct openers across 50 calls, saw {seen:?}"
+        );
+    }
+
+    /// Sampling cap: catchphrases get a small subset (~3) per call,
+    /// not the full list. With 10 catchphrases configured, any single
+    /// prompt should contain fewer than 10.
+    #[test]
+    fn system_prompt_samples_subset_of_catchphrases() {
+        let mut c = ctx();
+        c.persona.host.personality = Personality {
+            catchphrases: (0..10).map(|i| format!("cp_{i}")).collect(),
+            ..Default::default()
+        };
+        let s = system_prompt(&c);
+        let hits = (0..10).filter(|i| s.contains(&format!("cp_{i}"))).count();
+        assert!(
+            (1..10).contains(&hits),
+            "expected partial subset of catchphrases (1..10), got {hits} hits"
+        );
     }
 
     #[test]

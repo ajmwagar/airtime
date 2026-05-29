@@ -321,24 +321,60 @@ fn default_genre_filter() -> String {
     "blended".into()
 }
 
+/// Accepts either a TOML string or array of strings; yields `Vec<String>`.
+/// Used so a persona TOML can keep its legacy single-line
+/// `signature_opener = "..."` while new personas can write
+/// `signature_openers = ["...", "...", "..."]` and get rotation.
+fn string_or_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match OneOrMany::deserialize(deserializer)? {
+        OneOrMany::One(s) => vec![s],
+        OneOrMany::Many(v) => v,
+    })
+}
+
 /// Voice quirks — recurring bits, catchphrases, sign-offs that the
 /// system prompt threads into every script the LLM writes.
+///
+/// Sampled per-call: openers/closers pick one at random, catchphrases
+/// and inside_jokes show a small random subset each prompt. Without
+/// sampling the LLM sees the same single opener every time and
+/// reflexively opens with it on every segment — gets stale fast.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Personality {
-    #[serde(default)]
-    pub signature_opener: Option<String>,
-    #[serde(default)]
-    pub signature_closer: Option<String>,
-    /// Lines or themes the host returns to. Listed in the system prompt
-    /// as material the host *can* draw on; the LLM picks naturally.
+    /// One is sampled per prompt. Empty list → no opener line emitted.
+    #[serde(
+        default,
+        alias = "signature_opener",
+        deserialize_with = "string_or_vec"
+    )]
+    pub signature_openers: Vec<String>,
+    /// One is sampled per prompt. Empty list → no closer line emitted.
+    #[serde(
+        default,
+        alias = "signature_closer",
+        deserialize_with = "string_or_vec"
+    )]
+    pub signature_closers: Vec<String>,
+    /// Lines or themes the host returns to. Listed in full in every
+    /// system prompt — these define the character, sampling them would
+    /// make the persona feel inconsistent across segments.
     #[serde(default)]
     pub recurring_bits: Vec<String>,
     /// Short interjections — "sugar", "cats", "dig it" — that flavour
-    /// the host's voice.
+    /// the host's voice. ~3 sampled per prompt for rotation.
     #[serde(default)]
     pub catchphrases: Vec<String>,
     /// Persistent show-internal references — recurring fictional events,
-    /// venues, characters the host alludes to.
+    /// venues, characters the host alludes to. ~2 sampled per prompt.
     #[serde(default)]
     pub inside_jokes: Vec<String>,
     /// Free-form line about cadence, sentence shape, and energy — fed
@@ -594,9 +630,60 @@ format = "flac"
     #[test]
     fn personality_defaults_to_empty() {
         let persona: Persona = toml::from_str(DONNA).expect("parse");
-        assert!(persona.host.personality.signature_opener.is_none());
+        assert!(persona.host.personality.signature_openers.is_empty());
         assert!(persona.host.personality.recurring_bits.is_empty());
         assert!(persona.host.personality.catchphrases.is_empty());
+    }
+
+    /// Backwards-compat: legacy `signature_opener = "single string"`
+    /// must still deserialize, normalised into the new Vec<String>.
+    #[test]
+    fn personality_accepts_legacy_singular_opener() {
+        let toml = r#"
+[host]
+name = "X"
+callsign = "X"
+era = "X"
+genre = []
+voice_model = "X"
+tone_prompt = "X"
+[host.skills]
+[host.audio]
+loudness_target = -14.0
+[host.personality]
+signature_opener = "Legacy line."
+signature_closer = "Legacy out."
+[stream]
+mount  = "/x"
+format = "mp3"
+"#;
+        let p: Persona = toml::from_str(toml).expect("parse");
+        assert_eq!(p.host.personality.signature_openers, vec!["Legacy line."]);
+        assert_eq!(p.host.personality.signature_closers, vec!["Legacy out."]);
+    }
+
+    /// New plural form deserializes from an array.
+    #[test]
+    fn personality_accepts_plural_openers_array() {
+        let toml = r#"
+[host]
+name = "X"
+callsign = "X"
+era = "X"
+genre = []
+voice_model = "X"
+tone_prompt = "X"
+[host.skills]
+[host.audio]
+loudness_target = -14.0
+[host.personality]
+signature_openers = ["A", "B", "C"]
+[stream]
+mount  = "/x"
+format = "mp3"
+"#;
+        let p: Persona = toml::from_str(toml).expect("parse");
+        assert_eq!(p.host.personality.signature_openers.len(), 3);
     }
 
     #[test]
@@ -620,7 +707,7 @@ genre_filter = "strict"
 narrate_transitions = true
 
 [host.personality]
-signature_opener = "Hello world."
+signature_openers = ["Hello world.", "Hi there."]
 recurring_bits = ["one", "two"]
 catchphrases = ["sugar"]
 
@@ -631,10 +718,7 @@ format = "mp3"
         let persona: Persona = toml::from_str(toml).expect("parse");
         assert_eq!(persona.host.programming.genre_filter, "strict");
         assert!(persona.host.programming.narrate_transitions);
-        assert_eq!(
-            persona.host.personality.signature_opener.as_deref(),
-            Some("Hello world.")
-        );
+        assert_eq!(persona.host.personality.signature_openers.len(), 2);
         assert_eq!(persona.host.personality.recurring_bits.len(), 2);
         assert_eq!(persona.host.personality.catchphrases, vec!["sugar"]);
     }
