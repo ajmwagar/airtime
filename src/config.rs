@@ -549,6 +549,31 @@ mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
 
+    /// Every persona TOML actually shipped under `personas/` must parse
+    /// — guards against a schema change silently breaking one host while
+    /// the inline fixtures keep working.
+    #[test]
+    fn shipped_persona_files_all_parse() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("personas");
+        let entries =
+            std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("read_dir {}: {e}", dir.display()));
+        let mut checked = 0;
+        for entry in entries {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|s| s.to_str()) != Some("toml") {
+                continue;
+            }
+            Persona::load(&path)
+                .unwrap_or_else(|e| panic!("persona {} failed to parse: {e}", path.display()));
+            checked += 1;
+        }
+        assert!(
+            checked > 0,
+            "no persona .toml files found in {}",
+            dir.display()
+        );
+    }
+
     const DONNA: &str = r#"
 [host]
 name         = "Donna Wavelength"
