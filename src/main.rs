@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -244,6 +244,27 @@ async fn run_station(
         "station starting"
     );
 
+    // Loud per-station check: traffic skill enabled but no realistic
+    // data source means every traffic segment will hit the "no data"
+    // prompt branch — the LLM ad-libs around the absence and listeners
+    // rarely recognize the result as a traffic spot. Surface this so
+    // the operator can either disable the skill or supply the key.
+    if persona.host.skills.traffic {
+        let provider_configured = settings.feeds.traffic.is_some();
+        let key_set = std::env::var("TOMTOM_API_KEY").is_ok();
+        if !provider_configured {
+            warn!(
+                callsign = %persona.host.callsign,
+                "traffic skill enabled but [feeds.traffic] missing from settings.toml — segments will run on improvised 'no data' copy"
+            );
+        } else if !key_set {
+            warn!(
+                callsign = %persona.host.callsign,
+                "traffic skill enabled and provider configured, but TOMTOM_API_KEY is unset — segments will run on improvised 'no data' copy"
+            );
+        }
+    }
+
     // Three channels make up the audio chain:
     //   [Producer] --PlayItem--> [Consumer] --raw bytes--> [Icecast source]
     //
@@ -292,15 +313,43 @@ async fn run_station(
     let news_urls = collect_news_sources(&persona);
     if !news_urls.is_empty() {
         let news_feeds = feeds.clone();
+        let callsign = persona.host.callsign.clone();
+        let sources_count = news_urls.len();
+        info!(
+            callsign = %callsign,
+            sources = sources_count,
+            "news refresher starting"
+        );
         tokio::spawn(async move {
             let fetcher = NewsFetcher::new();
             loop {
                 let items = fetcher.fetch_all(&news_urls).await;
-                debug!(count = items.len(), "news refresh");
+                if items.is_empty() {
+                    // Loud — a silent zero-headline cache is the most common
+                    // reason `top_of_hour` produces a station mark with no
+                    // actual news in it. Surface it so the operator sees the
+                    // problem in normal-level logs.
+                    warn!(
+                        callsign = %callsign,
+                        sources = sources_count,
+                        "news refresh returned 0 items — feed unreachable or parse failed"
+                    );
+                } else {
+                    info!(
+                        callsign = %callsign,
+                        count = items.len(),
+                        "news refresh ok"
+                    );
+                }
                 news_feeds.set_news(items).await;
                 tokio::time::sleep(Duration::from_secs(15 * 60)).await;
             }
         });
+    } else {
+        info!(
+            callsign = %persona.host.callsign,
+            "no news sources configured for this persona"
+        );
     }
 
     // Pre-render the silence keepalive file. If ffmpeg isn't reachable
